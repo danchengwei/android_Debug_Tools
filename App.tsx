@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Activity, Box, Layers, Globe, Terminal, Cpu, Usb, AlertCircle, RefreshCw, Smartphone, Wrench, HelpCircle, X, ExternalLink, Copy, PlayCircle, Sparkles, Loader2 } from 'lucide-react';
+import { Box, Layers, Globe, Terminal, Cpu, Usb, AlertCircle, RefreshCw, Smartphone, Wrench, X, Sparkles, Loader2, FileArchive, Activity } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { adbService } from './services/adbService';
 import { DeviceInfo, AppStackInfo, AppEnvInfo, H5Info, LogEntry, LayoutNode } from './types';
@@ -7,12 +7,13 @@ import { ScreenMirror } from './components/ScreenMirror';
 import { InfoPanel } from './components/InfoPanel';
 import { DevTools } from './components/DevTools';
 import { AIAutomation } from './components/AIAutomation';
+import { Decompile } from './components/Decompile';
+import { Trace } from './components/Trace';
 
 const App: React.FC = () => {
   const [device, setDevice] = useState<DeviceInfo | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
-  const [activeTab, setActiveTab] = useState<'stack' | 'layout' | 'logs' | 'tools' | 'ai'>('stack');
+  const [activeTab, setActiveTab] = useState<'stack' | 'logs' | 'tools' | 'ai' | 'decompile' | 'trace'>('stack');
   
   // Connection Error State
   const [connError, setConnError] = useState<{
@@ -45,15 +46,15 @@ const App: React.FC = () => {
       setDevice(dev);
       fetchDeviceData();
     } catch (err: any) {
-      if (err.message === 'CANCELLED') return;
-      
-      let friendlyMsg = "连接失败，请检查数据线并确保手机已开启 USB 调试。";
-      let code = err.name || 'CONNECT_ERROR';
+      if (err?.message === 'CANCELLED') return;
 
-      if (err.message.includes('SecurityError')) {
-          friendlyMsg = "权限被拒绝，请在浏览器弹窗中允许访问 USB 设备。";
-      } else if (err.message.includes('NetworkError')) {
-          friendlyMsg = "设备已被其他程序占用（如本地 ADB 服务），请关闭本地 ADB 后重试。";
+      let friendlyMsg = "连接失败，请检查数据线并确保手机已开启 USB 调试。";
+      const code = err?.name || 'CONNECT_ERROR';
+
+      if (err?.message?.includes('SecurityError') || code === 'SecurityError') {
+        friendlyMsg = "权限被拒绝，请在浏览器弹窗中允许访问 USB 设备。";
+      } else if (err?.message?.includes('NetworkError') || code === 'NetworkError') {
+        friendlyMsg = "WebUSB 报错（ADB 已关时多为设备需重新枚举）。请：1) 拔掉数据线，等约 3 秒再插回；2) 在手机弹窗中点「允许 USB 调试」；3) 刷新本页后再次点击「连接 USB 设备」。若仍失败可换 USB 口或数据线、关闭「Android 文件传输」等占用 USB 的程序。";
       }
 
       setConnError({ code, message: friendlyMsg });
@@ -75,13 +76,14 @@ const App: React.FC = () => {
     if (!device) return;
     setLoadingData(true);
     try {
-        const [stack, env, h5, layoutData] = await Promise.all([
-            adbService.getTopActivity(),
-            adbService.getEnvironment(),
-            adbService.getH5Info(),
+        const stack = await adbService.getTopActivity();
+        setStackInfo(stack);
+        const pkg = stack?.packageName;
+        const [env, h5, layoutData] = await Promise.all([
+            adbService.getEnvironment(pkg),
+            adbService.getH5Info(pkg),
             adbService.getLayoutHierarchy()
         ]);
-        setStackInfo(stack);
         setEnvInfo(env);
         setH5Info(h5);
         setLayout(layoutData);
@@ -123,7 +125,6 @@ const App: React.FC = () => {
                 <div className="flex items-center gap-2 text-xs text-red-300 bg-red-950/30 px-3 py-1.5 rounded border border-red-900/40">
                     <AlertCircle size={14} />
                     <span>{connError.message}</span>
-                    <button onClick={() => setShowHelp(true)} className="underline ml-1 hover:text-white">查看解决办法</button>
                 </div>
             )}
 
@@ -180,23 +181,12 @@ const App: React.FC = () => {
                   <p className="text-sm text-red-200 font-medium">{connError.message}</p>
                   <p className="text-[10px] text-red-400/60 mt-2 font-mono break-all">Error Code: {connError.code}</p>
                 </div>
-                <div className="flex gap-3">
-                  <button 
-                    onClick={() => setConnError(null)}
-                    className="flex-1 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-sm font-medium transition-colors"
-                  >
-                    关闭
-                  </button>
-                  <button 
-                    onClick={() => {
-                      setConnError(null);
-                      setShowHelp(true);
-                    }}
-                    className="flex-1 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors"
-                  >
-                    查看排查指南
-                  </button>
-                </div>
+                <button 
+                  onClick={() => setConnError(null)}
+                  className="w-full px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                  关闭
+                </button>
               </div>
             </motion.div>
           </div>
@@ -222,49 +212,6 @@ const App: React.FC = () => {
           </div>
         )}
       </AnimatePresence>
-
-      {/* Troubleshooting Modal */}
-      {showHelp && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-            <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-2xl w-full shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-850">
-                    <h3 className="font-bold text-white flex items-center gap-2">
-                        <HelpCircle size={18} className="text-cyan-400" /> 
-                        连接问题排查指南
-                    </h3>
-                    <button onClick={() => setShowHelp(false)} className="text-slate-500 hover:text-white"><X size={20}/></button>
-                </div>
-                <div className="p-6 overflow-y-auto space-y-6">
-                    
-                    <div className="p-4 rounded border bg-slate-950 border-slate-800">
-                        <h4 className="text-sm font-bold mb-2 text-slate-300">
-                            WebUSB 直连模式说明
-                        </h4>
-                        <p className="text-xs text-slate-400 leading-relaxed mb-2">
-                            1. <span className="text-cyan-400 font-bold">无需本地 ADB：</span>本工具直接通过浏览器 WebUSB API 与手机通信，无需安装任何本地软件。<br/>
-                            2. <span className="text-cyan-400 font-bold">浏览器要求：</span>必须使用 Chrome、Edge 或 Opera 浏览器。<br/>
-                            3. <span className="text-cyan-400 font-bold">冲突解决：</span>如果连接失败，请确保已关闭电脑上的本地 ADB 服务（执行 <code className="bg-slate-800 px-1 rounded text-cyan-300">adb kill-server</code>），因为 USB 接口无法被同时占用。<br/>
-                            4. <span className="text-cyan-400 font-bold">设备授权：</span>点击连接后，请在浏览器弹窗中选择设备，并留意手机屏幕上的“允许 USB 调试”确认弹窗。
-                        </p>
-                    </div>
-
-                    <div className="p-4 rounded border bg-slate-950 border-slate-800">
-                        <h4 className="text-sm font-bold mb-2 text-slate-300">
-                            常见问题
-                        </h4>
-                        <ul className="text-xs text-slate-400 list-disc list-inside space-y-1">
-                            <li><span className="text-slate-200">未发现设备：</span>请检查数据线连接，并确保手机已授权调试。</li>
-                            <li><span className="text-slate-200">权限不足：</span>在服务器上尝试运行 <span className="text-cyan-400 font-mono">adb devices</span> 确认是否能列出设备。</li>
-                            <li><span className="text-slate-200">离线状态：</span>如果设备显示为 offline，请在手机上重新插拔并授权。</li>
-                        </ul>
-                    </div>
-                </div>
-                <div className="p-4 border-t border-slate-800 bg-slate-900 flex justify-end">
-                    <button onClick={() => setShowHelp(false)} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded text-sm transition-colors">关闭</button>
-                </div>
-            </div>
-        </div>
-      )}
 
       {/* Main Content */}
       <main className="flex-1 p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -325,31 +272,68 @@ const App: React.FC = () => {
               title="环境信息" 
               icon={Box} 
               loading={loadingData}
-              onRefresh={() => adbService.getEnvironment().then(setEnvInfo)}
+              onRefresh={() => adbService.getEnvironment(stackInfo?.packageName).then(setEnvInfo)}
             >
               {envInfo ? (
-                <div className="space-y-4">
-                  <div className="flex flex-col items-center justify-center py-2">
-                    <span className={`text-xl font-black tracking-widest ${
-                      envInfo.environment === 'PRODUCTION' 
-                        ? 'text-red-400 drop-shadow-[0_0_8px_rgba(248,113,113,0.3)]' 
-                        : envInfo.environment === 'STAGING'
-                        ? 'text-yellow-400 drop-shadow-[0_0_8px_rgba(250,204,21,0.3)]'
-                        : 'text-green-400'
-                    }`}>
-                      {envInfo.environment}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                      <span className="block text-[10px] text-slate-500">版本号</span>
-                      <span className="text-slate-300 font-mono">{envInfo.versionName}</span>
+                <div className="space-y-3">
+                  {/* 设备版本：连接后始终显示 */}
+                  {(envInfo.deviceAndroidVersion != null || envInfo.deviceSdkVersion != null) && (
+                    <div className="pb-2 border-b border-slate-800">
+                      <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">设备版本</span>
+                      <div className="grid grid-cols-2 gap-1.5 mt-1 text-xs">
+                        <div className="bg-slate-950 p-1.5 rounded border border-slate-800">
+                          <span className="block text-[10px] text-slate-500">Android</span>
+                          <span className="text-slate-300 font-mono">{envInfo.deviceAndroidVersion ?? '-'}</span>
+                        </div>
+                        <div className="bg-slate-950 p-1.5 rounded border border-slate-800">
+                          <span className="block text-[10px] text-slate-500">SDK</span>
+                          <span className="text-slate-300 font-mono">{envInfo.deviceSdkVersion ?? '-'}</span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                      <span className="block text-[10px] text-slate-500">构建号</span>
-                      <span className="text-slate-300 font-mono">{envInfo.versionCode}</span>
-                    </div>
-                  </div>
+                  )}
+                  {/* 当前应用：仅在有前台应用且非桌面时显示 */}
+                  {isAppOpen && (
+                    <>
+                      <div className="flex flex-col items-center justify-center py-1">
+                        <span className={`text-lg font-black tracking-widest ${
+                          envInfo.environment === 'PRODUCTION' 
+                            ? 'text-red-400' 
+                            : envInfo.environment === 'STAGING'
+                            ? 'text-yellow-400'
+                            : 'text-green-400'
+                        }`}>
+                          {envInfo.environment}
+                        </span>
+                        <span className="text-[10px] text-slate-500 mt-0.5">当前应用</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5 text-xs">
+                        <div className="bg-slate-950 p-1.5 rounded border border-slate-800">
+                          <span className="block text-[10px] text-slate-500">应用版本</span>
+                          <span className="text-slate-300 font-mono truncate block" title={envInfo.versionName}>{envInfo.versionName}</span>
+                        </div>
+                        <div className="bg-slate-950 p-1.5 rounded border border-slate-800">
+                          <span className="block text-[10px] text-slate-500">构建号</span>
+                          <span className="text-slate-300 font-mono">{envInfo.versionCode}</span>
+                        </div>
+                        {envInfo.targetSdkVersion != null && (
+                          <div className="bg-slate-950 p-1.5 rounded border border-slate-800">
+                            <span className="block text-[10px] text-slate-500">targetSdk</span>
+                            <span className="text-cyan-300 font-mono">{envInfo.targetSdkVersion}</span>
+                          </div>
+                        )}
+                        {envInfo.minSdkVersion != null && (
+                          <div className="bg-slate-950 p-1.5 rounded border border-slate-800">
+                            <span className="block text-[10px] text-slate-500">minSdk</span>
+                            <span className="text-cyan-300 font-mono">{envInfo.minSdkVersion}</span>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                  {!isAppOpen && envInfo.deviceSdkVersion != null && (
+                    <div className="text-center text-slate-500 text-xs py-1">无前台应用，仅显示设备版本</div>
+                  )}
                 </div>
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-slate-600 text-center px-4">
@@ -365,7 +349,7 @@ const App: React.FC = () => {
               title="WebView H5 调试" 
               icon={Globe} 
               loading={loadingData}
-              onRefresh={() => adbService.getH5Info().then(setH5Info)}
+              onRefresh={() => adbService.getH5Info(stackInfo?.packageName).then(setH5Info)}
             >
                {h5Info && h5Info.currentUrl ? (
                 <div className="space-y-3">
@@ -427,6 +411,18 @@ const App: React.FC = () => {
               >
                 <Sparkles size={14} /> AI 自动化
               </button>
+              <button 
+                onClick={() => setActiveTab('decompile')}
+                className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors flex items-center gap-2 ${activeTab === 'decompile' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}
+              >
+                <FileArchive size={14} /> 反编译
+              </button>
+              <button 
+                onClick={() => setActiveTab('trace')}
+                className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors flex items-center gap-2 ${activeTab === 'trace' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}
+              >
+                <Activity size={14} /> Trace
+              </button>
             </div>
 
             <div className="flex-1 overflow-auto p-4 font-mono text-xs relative">
@@ -474,6 +470,10 @@ const App: React.FC = () => {
                    connected={!!device}
                  />
                )}
+
+               {activeTab === 'decompile' && <Decompile />}
+
+               {activeTab === 'trace' && <Trace connected={!!device} />}
             </div>
           </div>
         </div>

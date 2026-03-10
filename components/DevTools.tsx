@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { adbService } from '../services/adbService';
-import { Grid3x3, Fingerprint, Trash2, RotateCcw, Monitor, FileCode, CheckCircle2, Circle } from 'lucide-react';
+import { Grid3x3, Fingerprint, Trash2, RotateCcw, Monitor, FileCode, CheckCircle2, Circle, Database, Network, Loader2 } from 'lucide-react';
 
 interface DevToolsProps {
   packageName?: string;
@@ -11,10 +11,24 @@ export const DevTools: React.FC<DevToolsProps> = ({ packageName, connected }) =>
   const [layoutBounds, setLayoutBounds] = useState(false);
   const [showTaps, setShowTaps] = useState(false);
   const [processing, setProcessing] = useState<string | null>(null);
+  const [dbList, setDbList] = useState<string | null>(null);
+  const [dbLoading, setDbLoading] = useState(false);
 
   const isEnabled = connected && !!packageName;
   const displayPackage = packageName || '未选中应用';
   const hasApp = !!packageName;
+
+  const handleListDatabases = async () => {
+    if (!isEnabled) return;
+    setDbLoading(true);
+    setDbList(null);
+    try {
+      const out = await adbService.listAppDataDir(displayPackage);
+      setDbList(out);
+    } finally {
+      setDbLoading(false);
+    }
+  };
 
   const handleToggleLayout = async () => {
     if (!connected) return;
@@ -131,12 +145,38 @@ export const DevTools: React.FC<DevToolsProps> = ({ packageName, connected }) =>
         </div>
       </div>
       
-      {/* Placeholder for more tools */}
-      <div className="col-span-1 border border-dashed border-slate-800 rounded-lg p-4 flex flex-col items-center justify-center text-slate-600 gap-2">
-         <span className="text-xs text-center">更多工具开发中...</span>
-         <div className="text-[10px] opacity-50">数据库查看器 • 网络抓包</div>
+      {/* 应用数据 / 数据库列表 */}
+      <div className="col-span-1 bg-slate-950/50 rounded-lg p-4 border border-slate-800">
+        <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 flex items-center gap-2">
+          <Database size={14} /> 应用数据目录
+        </h4>
+        <p className="text-[10px] text-slate-500 mb-2">仅 debuggable 应用可查看 databases/ 列表</p>
+        <button
+          onClick={handleListDatabases}
+          disabled={!!processing || !isEnabled || dbLoading}
+          className="w-full flex items-center justify-center gap-2 p-3 rounded-md border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800 transition-colors disabled:opacity-50"
+        >
+          {dbLoading ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
+          <span className="text-sm">{dbLoading ? '获取中...' : '列出 databases'}</span>
+        </button>
+        {dbList != null && (
+          <pre className="mt-3 p-2 bg-slate-950 rounded border border-slate-800 text-[10px] text-slate-400 overflow-auto max-h-32 whitespace-pre-wrap break-all">
+            {dbList}
+          </pre>
+        )}
       </div>
 
+      {/* 网络抓包说明 */}
+      <div className="col-span-1 border border-slate-800 rounded-lg p-4 bg-slate-950/50">
+        <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 flex items-center gap-2">
+          <Network size={14} /> 网络抓包
+        </h4>
+        <ul className="text-[10px] text-slate-400 space-y-1 list-disc list-inside">
+          <li>系统代理：在电脑端配置 Charles / Proxyman，手机 WiFi 代理指向电脑，可抓 HTTP(S)。</li>
+          <li>WebView 调试：Chrome 访问 <code className="bg-slate-800 px-0.5 rounded">chrome://inspect</code>，对 WebView 进行审查与网络面板查看。</li>
+          <li>HTTPS 需在设备上安装并信任抓包工具根证书。</li>
+        </ul>
+      </div>
     </div>
   );
 };

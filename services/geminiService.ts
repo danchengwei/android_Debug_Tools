@@ -146,3 +146,55 @@ export const analyzeScreenWithGemini = async (base64Image: string, promptText: s
     throw error;
   }
 };
+
+/**
+ * 基于反编译得到的类列表，用大模型回答用户问题（例如「当前反编译是否使用了 xxx 类」）。
+ */
+export const analyzeDecompiledWithGemini = async (
+  classes: string[],
+  userQuestion: string
+): Promise<string> => {
+  if (!process.env.API_KEY) {
+    throw new Error("API Key not found in environment variables");
+  }
+
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const classListText = classes.length > 500
+    ? classes.slice(0, 500).join("\n") + `\n... 等共 ${classes.length} 个类（已截断前 500 个）`
+    : classes.join("\n");
+
+  const systemInstruction =
+    "你是一位 Android 逆向与安全分析专家。用户会提供一份从 APK 反编译得到的类列表（DEX 中的类描述符，如 Lcom/example/Main;），以及一个自然语言问题。请仅根据这份类列表回答：例如是否使用了某类、某 SDK、某包名等。回答要简洁、准确，使用中文。若类列表为空或无法判断，请说明。";
+
+  const prompt = `【反编译类列表】\n${classListText}\n\n【用户问题】\n${userQuestion}`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents: { parts: [{ text: prompt }] },
+    config: { systemInstruction },
+  });
+
+  return response.text ?? "未得到有效回复。";
+};
+
+/**
+ * 对 trace 原始内容或摘要做简要分析（卡顿、掉帧、建议等），使用中文回复。
+ */
+export const analyzeTraceWithGemini = async (traceContentOrSummary: string): Promise<string> => {
+  if (!process.env.API_KEY) {
+    throw new Error("API Key not found in environment variables");
+  }
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const excerpt =
+    traceContentOrSummary.length > 30000
+      ? traceContentOrSummary.slice(0, 30000) + "\n\n... (已截断)"
+      : traceContentOrSummary;
+  const systemInstruction =
+    "你是一位 Android 性能与 systrace/atrace 分析专家。用户会提供一段 trace 原始输出或摘要。请从渲染、主线程、掉帧、卡顿、IPC 等角度给出简要结论与优化建议，使用中文，条理清晰。";
+  const response = await ai.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents: { parts: [{ text: `【Trace 内容】\n${excerpt}\n\n请给出简要分析与建议。` }] },
+    config: { systemInstruction },
+  });
+  return response.text ?? "未得到有效回复。";
+};

@@ -1,7 +1,10 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { adbService } from '../services/adbService';
 import { analyzeScreenWithGemini } from '../services/geminiService';
-import { Smartphone, Sparkles, Loader2, ChevronLeft, Circle, Square, Power, Volume2, ZoomIn, ZoomOut, Camera, Video, StopCircle, RefreshCw } from 'lucide-react';
+import { Smartphone, Sparkles, Loader2, ChevronLeft, Circle, Square, Power, ZoomIn, ZoomOut, Camera, Video, StopCircle, RefreshCw } from 'lucide-react';
+
+const MIRROR_WIDTH = 320;
+const MIRROR_HEIGHT = 680;
 
 interface ScreenMirrorProps {
   connected: boolean;
@@ -14,11 +17,18 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
   
   // Screen state
   const [screenImage, setScreenImage] = useState<string | null>(null);
+  const [screenError, setScreenError] = useState<string | null>(null);
   const [isLoadingFrame, setIsLoadingFrame] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [zoom, setZoom] = useState(0.8);
   
   const refreshTimerRef = useRef<number | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const mirrorImgRef = useRef<HTMLImageElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const rafIdRef = useRef<number | null>(null);
 
   const handleZoomIn = () => setZoom(prev => Math.min(prev + 0.1, 2));
   const handleZoomOut = () => setZoom(prev => Math.max(prev - 0.1, 0.2));
@@ -40,13 +50,16 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
 
   const fetchScreen = async () => {
       if (!connected) return;
+      setScreenError(null);
       try {
           const imgUrl = await adbService.captureScreen();
           setScreenImage(prev => {
-              if (prev) URL.revokeObjectURL(prev); // Cleanup old blob URL
+              if (prev) URL.revokeObjectURL(prev);
               return imgUrl;
           });
       } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          setScreenError(msg);
           console.error("Failed to fetch screen frame", e);
       }
   };
@@ -87,12 +100,6 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
     setTimeout(fetchScreen, 500);
   };
 
-  const handleStopApp = async () => {
-    if (!connected) return;
-    await adbService.terminateApp("current.package"); // Note: Needs actual pkg name in real app
-    setTimeout(fetchScreen, 500);
-  };
-
   const handleScreenshot = async () => {
     if (!connected || !screenImage) return;
     const link = document.createElement('a');
@@ -101,8 +108,78 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
     link.click();
   };
 
+  // 录屏：将当前投屏画面绘制到 canvas，用 MediaRecorder 录制
+  const startRecording = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    recordChunksRef.current = [];
+    try {
+      const stream = canvas.captureStream(15);
+      streamRef.current = stream;
+      const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+        ? 'video/webm;codecs=vp9'
+        : 'video/webm';
+      const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2500000 });
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) recordChunksRef.current.push(e.data); };
+      recorder.onstop = () => {
+        const blob = new Blob(recordChunksRef.current, { type: 'video/webm' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.download = `screen-mirror-${new Date().getTime()}.webm`;
+        a.href = url;
+        a.click();
+        URL.revokeObjectURL(url);
+        stream.getTracks().forEach((t) => t.stop());
+      };
+      recorder.start(500);
+      setRecording(true);
+    } catch (e) {
+      console.error('录屏启动失败', e);
+    }
+  };
+
+  const stopRecording = () => {
+    if (rafIdRef.current != null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current = null;
+    }
+    setRecording(false);
+  };
+
+  // 录屏时的绘制循环：把当前帧画到 canvas
+  useEffect(() => {
+    if (!recording) return;
+    const canvas = canvasRef.current;
+    const img = mirrorImgRef.current;
+    if (!canvas || !img) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const draw = () => {
+      if (img.complete && img.naturalWidth > 0) {
+        ctx.drawImage(img, 0, 0, MIRROR_WIDTH, MIRROR_HEIGHT);
+      } else {
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(0, 0, MIRROR_WIDTH, MIRROR_HEIGHT);
+      }
+      rafIdRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => {
+      if (rafIdRef.current != null) cancelAnimationFrame(rafIdRef.current);
+    };
+  }, [recording]);
+
   return (
     <div className="flex flex-col h-full bg-slate-900 rounded-xl border border-slate-800 overflow-hidden shadow-lg select-none">
+      {/* 录屏用：隐藏的 canvas 与镜像图，用于 MediaRecorder 捕获 */}
+      <canvas ref={canvasRef} width={MIRROR_WIDTH} height={MIRROR_HEIGHT} className="absolute -left-[9999px] w-0 h-0" />
+      <img ref={mirrorImgRef} src={screenImage ?? 'data:image/gif;base64,R0lGOODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=='} alt="" className="absolute -left-[9999px] w-0 h-0" />
       {/* Top Control Bar */}
       <div className="flex items-center justify-between px-4 py-2 bg-slate-850 border-b border-slate-800 shrink-0">
         <div className="flex items-center gap-2">
@@ -144,6 +221,15 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
           <button onClick={handleScreenshot} disabled={!connected || !screenImage} className="p-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-cyan-400 transition-colors" title="保存截图">
             <Camera size={16} />
           </button>
+          {!recording ? (
+            <button onClick={startRecording} disabled={!connected || !screenImage} className="p-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-red-400 transition-colors" title="开始录屏">
+              <Video size={16} />
+            </button>
+          ) : (
+            <button onClick={stopRecording} className="p-1.5 rounded bg-red-600/80 text-white hover:bg-red-500 transition-colors" title="停止录屏">
+              <StopCircle size={16} />
+            </button>
+          )}
           
           <div className="w-px h-4 bg-slate-700 mx-1 self-center"></div>
 
@@ -171,7 +257,12 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
                     <div className="w-12 h-1 bg-slate-900 rounded-full"></div>
                 </div>
                 
-                {screenImage ? (
+                {screenError ? (
+                    <div className="flex flex-col items-center justify-center text-slate-400 gap-3 p-4 text-center">
+                        <span className="text-xs font-mono text-amber-400">{screenError}</span>
+                        <span className="text-[10px] text-slate-500">可点击刷新重试</span>
+                    </div>
+                ) : screenImage ? (
                     <img 
                         src={screenImage} 
                         alt="Screen Mirror" 

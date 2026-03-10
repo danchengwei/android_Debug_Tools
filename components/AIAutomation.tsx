@@ -26,19 +26,33 @@ export const AIAutomation: React.FC<AIAutomationProps> = ({ connected }) => {
 
     const history: string[] = [];
 
+    /** 将 blob URL 转为 base64 data URL，供 Gemini 接口使用 */
+    const blobUrlToBase64 = async (url: string): Promise<string> => {
+      const res = await fetch(url);
+      const blob = await res.blob();
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    };
+
     try {
       while (isRunningRef.current) {
-        // 1. Capture screen
-        const screenshot = await adbService.captureScreen();
-        
-        // 2. Get next action from AI
-        const action = await getNextAutomationAction(screenshot, goal, history);
+        // 1. 截屏（返回 blob URL），转为 base64 供 Gemini 与步骤展示使用
+        const screenshotBlobUrl = await adbService.captureScreen();
+        const screenshotBase64 = await blobUrlToBase64(screenshotBlobUrl);
+        if (screenshotBlobUrl) URL.revokeObjectURL(screenshotBlobUrl);
+
+        // 2. 使用 base64 图片调用 AI 决策
+        const action = await getNextAutomationAction(screenshotBase64, goal, history);
         
         const step: AutomationStep = {
           id: Math.random().toString(36).substr(2, 9),
           action,
           status: 'running',
-          screenshot,
+          screenshot: screenshotBase64,
           timestamp: Date.now()
         };
         
@@ -84,8 +98,8 @@ export const AIAutomation: React.FC<AIAutomationProps> = ({ connected }) => {
         // Wait for UI to update
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsRunning(false);
       isRunningRef.current = false;

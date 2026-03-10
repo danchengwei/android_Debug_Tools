@@ -18,6 +18,14 @@ export interface AppEnvInfo {
   versionCode: number;
   versionName: string;
   debuggable: boolean;
+  /** 当前应用 targetSdkVersion，仅当有包名时有值 */
+  targetSdkVersion?: number;
+  /** 当前应用 minSdkVersion，仅当有包名时有值 */
+  minSdkVersion?: number;
+  /** 设备 Android 系统版本，如 "14" */
+  deviceAndroidVersion?: string;
+  /** 设备 SDK API Level，如 34 */
+  deviceSdkVersion?: number;
 }
 
 export interface H5Info {
@@ -65,4 +73,14 @@ export interface AutomationStep {
   status: 'pending' | 'running' | 'completed' | 'failed';
   screenshot?: string;
   timestamp: number;
+}
+
+/** 反编译结果：从 APK 中解析出的类/方法等信息 */
+export interface DecompileInfo {
+  /** 包名（从 AndroidManifest 或 classes 推断） */
+  packageName: string | null;
+  /** 所有类描述符，如 Lcom/example/MainActivity; */
+  classes: string[];
+  /** 可选：类 -> 方法签名列表（后续扩展） */
+  methodsByClass?: Record<string, string[]>;
 }

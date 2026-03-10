@@ -1,0 +1,7 @@
+{
+  "name": "DroidScope 本地安卓调试器",
+  "description": "专业的本地安卓真机调试工具。支持实时投屏、Activity 堆栈分析、环境信息检测、Layout 布局查看及 AI 辅助 UI 分析。专为本地 USB 连接真机设计。",
+  "requestFramePermissions": [
+    "usb"
+  ]
+}

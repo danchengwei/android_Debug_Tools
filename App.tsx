@@ -206,9 +206,7 @@ const App: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* 移除 WebUSB 相关等待授权弹窗 */}
-
-      {/* Connecting Overlay：先出现「连接中」，再弹出浏览器设备选择；选完设备后需在手机上点「允许」 */}
+      {/* 连接中状态提示 */}
       <AnimatePresence>
         {connecting && (
           <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 backdrop-blur-sm">
@@ -216,14 +214,13 @@ const App: React.FC = () => {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 10 }}
-              className="bg-slate-900/95 border border-slate-600 px-8 py-6 rounded-2xl shadow-2xl flex items-center gap-5 max-w-sm"
+              className="bg-slate-900/95 border border-cyan-500/30 px-8 py-6 rounded-2xl shadow-2xl flex items-center gap-5 max-w-sm"
             >
               <Loader2 className="text-cyan-400 animate-spin shrink-0" size={28} />
               <div className="flex flex-col gap-1.5">
                 <span className="text-white font-bold">正在连接设备</span>
                 <span className="text-xs text-slate-400 leading-relaxed">
-                  ① 在浏览器弹窗中选中设备，点击「连接」<br />
-                  ② 在手机上出现「允许 USB 调试」时点击「允许」
+                  正在通过本地 ADB 连接设备...
                 </span>
               </div>
             </motion.div>

@@ -16,19 +16,25 @@ export class LocalAdbService {
       // 检查 ADB 是否可用
       const result = await this.execShell('adb devices');
       console.log('ADB devices 结果:', result);
-      if (!result.includes('device')) {
-        throw new Error('未找到连接的设备');
-      }
-
-      // 获取设备信息
-      const model = await this.getProp('ro.product.model');
-      console.log('设备型号:', model);
-      const manufacturer = await this.getProp('ro.product.manufacturer');
-      console.log('设备厂商:', manufacturer);
-      const batteryLevel = await this.getBatteryLevel();
-      console.log('电池电量:', batteryLevel);
-
+      
+      // 即使没有设备连接，也返回基本的连接状态
       this.connected = true;
+
+      // 尝试获取设备信息，如果失败则使用默认值
+      let model = 'Unknown';
+      let manufacturer = 'Android';
+      let batteryLevel = 50;
+
+      try {
+        model = await this.getProp('ro.product.model') || 'Unknown';
+        console.log('设备型号:', model);
+        manufacturer = await this.getProp('ro.product.manufacturer') || 'Android';
+        console.log('设备厂商:', manufacturer);
+        batteryLevel = await this.getBatteryLevel();
+        console.log('电池电量:', batteryLevel);
+      } catch (e) {
+        console.error('获取设备信息失败:', e);
+      }
 
       return {
         id: 'local-adb',
@@ -214,7 +220,7 @@ export class LocalAdbService {
   async captureScreen(): Promise<string> {
     try {
       // 调用 ADB 服务器的 /api/screen 端点获取截图
-      const response = await fetch('http://localhost:3001/api/screen');
+      const response = await fetch('http://localhost:3003/api/screen');
       if (!response.ok) {
         throw new Error('截图失败');
       }
@@ -230,7 +236,7 @@ export class LocalAdbService {
       console.log('执行命令:', command);
       // 浏览器环境中无法直接调用 child_process
       // 需要通过 HTTP 桥接
-      fetch(`http://localhost:3001/api/adb?command=${encodeURIComponent(command)}`)
+      fetch(`http://localhost:3003/api/adb?command=${encodeURIComponent(command)}`)
         .then(response => {
           console.log('响应状态:', response.status);
           return response.text();

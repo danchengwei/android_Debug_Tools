@@ -4,7 +4,10 @@ import { analyzeDecompiledWithGemini } from '../services/geminiService';
 import { DecompileInfo } from '../types';
 import { FileArchive, Search, Sparkles, Loader2, X, Send } from 'lucide-react';
 
-export const Decompile: React.FC = () => {
+export const Decompile: React.FC<{
+  /** 同步反编译结果给 AI 对话侧边栏 */
+  onDecompileInfo?: (info: DecompileInfo | null) => void;
+}> = ({ onDecompileInfo }) => {
   const [info, setInfo] = useState<DecompileInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,10 +27,12 @@ export const Decompile: React.FC = () => {
     setError(null);
     setInfo(null);
     setAiAnswer(null);
+    onDecompileInfo?.(null);
     setLoading(true);
     try {
       const result = await decompileApk(file);
       setInfo(result);
+      onDecompileInfo?.(result);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '解析 APK 失败');
     } finally {

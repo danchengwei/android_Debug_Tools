@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { adbService } from '../services/adbService';
-import { analyzeScreenWithGemini } from '../services/geminiService';
-import { Smartphone, Sparkles, Loader2, ChevronLeft, Circle, Square, Power, ZoomIn, ZoomOut, Camera, Video, StopCircle, RefreshCw } from 'lucide-react';
+import { Smartphone, Loader2, ChevronLeft, Circle, Square, Power, ZoomIn, ZoomOut, Video, StopCircle, RefreshCw } from 'lucide-react';
 
 const MIRROR_WIDTH = 320;
 const MIRROR_HEIGHT = 680;
@@ -11,18 +10,19 @@ interface ScreenMirrorProps {
 }
 
 export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
-  const [analyzing, setAnalyzing] = useState(false);
-  const [analysisResult, setAnalysisResult] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   
-  // Screen state
   const [screenImage, setScreenImage] = useState<string | null>(null);
   const [screenError, setScreenError] = useState<string | null>(null);
   const [isLoadingFrame, setIsLoadingFrame] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [zoom, setZoom] = useState(0.8);
   
-  const refreshTimerRef = useRef<number | null>(null);
+  const fetchInFlightRef = useRef(false);
+  const connectedRef = useRef(connected);
+  const autoRefreshRef = useRef(autoRefresh);
+  connectedRef.current = connected;
+  autoRefreshRef.current = autoRefresh;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const mirrorImgRef = useRef<HTMLImageElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -33,64 +33,45 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
   const handleZoomIn = () => setZoom(prev => Math.min(prev + 0.1, 2));
   const handleZoomOut = () => setZoom(prev => Math.max(prev - 0.1, 0.2));
 
-  // Effect to fetch initial screen or handle auto-refresh
-  useEffect(() => {
-    if (connected && autoRefresh) {
-        fetchScreen();
-        // Use a slower interval for Real ADB as it transfers megabytes of data
-        refreshTimerRef.current = window.setInterval(fetchScreen, 3000); 
-    } else {
-        if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-        if (!connected) setScreenImage(null);
-    }
-    return () => {
-        if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-    }
-  }, [connected, autoRefresh]);
-
   const fetchScreen = async () => {
-      if (!connected) return;
+      if (!connectedRef.current) return;
+      if (fetchInFlightRef.current) return;
+      fetchInFlightRef.current = true;
       setScreenError(null);
+      let success = false;
       try {
           const imgUrl = await adbService.captureScreen();
           setScreenImage(prev => {
               if (prev) URL.revokeObjectURL(prev);
               return imgUrl;
           });
+          success = true;
       } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           setScreenError(msg);
           console.error("Failed to fetch screen frame", e);
+      } finally {
+          fetchInFlightRef.current = false;
+          if (success && connectedRef.current && autoRefreshRef.current) {
+              setTimeout(() => fetchScreen(), 0);
+          }
       }
   };
 
+  useEffect(() => {
+    if (connected && autoRefresh) {
+        fetchScreen();
+    } else {
+        if (!connected) setScreenImage(null);
+    }
+  }, [connected, autoRefresh]);
+
   const handleManualRefresh = async () => {
-      if (isLoadingFrame) return;
+      if (fetchInFlightRef.current) return;
       setIsLoadingFrame(true);
+      setScreenError(null);
       await fetchScreen();
       setIsLoadingFrame(false);
-  };
-
-  const handleGeminiAnalyze = async () => {
-    if (analyzing || !connected || !screenImage) return;
-    setAnalyzing(true);
-    setAnalysisResult(null);
-    try {
-      // Need to convert blob URL back to base64 for Gemini
-      const response = await fetch(screenImage);
-      const blob = await response.blob();
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-          const base64 = reader.result as string;
-          const result = await analyzeScreenWithGemini(base64, "请分析当前界面的 UI/UX 问题，使用中文回复。");
-          setAnalysisResult(result || "分析完成。");
-          setAnalyzing(false);
-      };
-      reader.readAsDataURL(blob);
-    } catch (error) {
-      setAnalysisResult("分析失败，请重试。");
-      setAnalyzing(false);
-    }
   };
 
   const handleKey = async (code: number) => {
@@ -98,14 +79,6 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
     await adbService.sendKeyEvent(code);
     // Delay refresh to allow UI to update on device
     setTimeout(fetchScreen, 500);
-  };
-
-  const handleScreenshot = async () => {
-    if (!connected || !screenImage) return;
-    const link = document.createElement('a');
-    link.download = `screenshot-${new Date().getTime()}.png`;
-    link.href = screenImage; 
-    link.click();
   };
 
   // 录屏：将当前投屏画面绘制到 canvas，用 MediaRecorder 录制
@@ -195,32 +168,15 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
                 onClick={() => setAutoRefresh(!autoRefresh)}
                 className={`ml-2 text-[10px] px-2 py-0.5 rounded border transition-colors ${autoRefresh ? 'border-green-800 bg-green-900/30 text-green-400' : 'border-slate-700 bg-slate-800 text-slate-400'}`}
                >
-                   {autoRefresh ? '自动刷新 (3s)' : '已暂停'}
+                   {autoRefresh ? '实时传输' : '已暂停'}
                </button>
            )}
         </div>
         <div className="flex gap-1 items-center">
-            <button 
-                onClick={handleGeminiAnalyze}
-                disabled={!connected || !screenImage || analyzing}
-                className={`flex items-center gap-1.5 px-3 py-1 mr-2 rounded text-[10px] font-bold transition-all ${
-                analyzing 
-                    ? 'bg-purple-900/50 text-purple-300 cursor-not-allowed' 
-                    : connected && screenImage ? 'bg-purple-600 hover:bg-purple-500 text-white shadow shadow-purple-900/20' : 'bg-slate-800 text-slate-500'
-                }`}
-                title="使用 AI 分析当前界面"
-            >
-                {analyzing ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-                {analyzing ? '分析中' : 'AI 分析'}
-            </button>
-
             <button onClick={handleManualRefresh} disabled={!connected} className="p-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-cyan-400 transition-colors" title="立即刷新">
                 <RefreshCw size={16} className={isLoadingFrame ? "animate-spin" : ""} />
             </button>
             <div className="w-px h-4 bg-slate-700 mx-1 self-center"></div>
-          <button onClick={handleScreenshot} disabled={!connected || !screenImage} className="p-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-cyan-400 transition-colors" title="保存截图">
-            <Camera size={16} />
-          </button>
           {!recording ? (
             <button onClick={startRecording} disabled={!connected || !screenImage} className="p-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-red-400 transition-colors" title="开始录屏">
               <Video size={16} />
@@ -258,16 +214,29 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
                 </div>
                 
                 {screenError ? (
-                    <div className="flex flex-col items-center justify-center text-slate-400 gap-3 p-4 text-center">
-                        <span className="text-xs font-mono text-amber-400">{screenError}</span>
-                        <span className="text-[10px] text-slate-500">可点击刷新重试</span>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={handleManualRefresh}
+                      disabled={isLoadingFrame}
+                      className="flex flex-col items-center justify-center text-slate-400 gap-3 p-4 text-center w-full h-full hover:bg-slate-800/50 transition-colors rounded-lg disabled:opacity-50"
+                    >
+                        <span className="text-xs font-mono text-amber-400 break-all">{screenError}</span>
+                        <span className="text-[10px] text-cyan-400">点击此处刷新重试</span>
+                    </button>
                 ) : screenImage ? (
-                    <img 
-                        src={screenImage} 
-                        alt="Screen Mirror" 
-                        className="w-full h-full object-cover" 
-                    />
+                    <button
+                      type="button"
+                      onClick={handleManualRefresh}
+                      disabled={isLoadingFrame}
+                      className="w-full h-full block focus:outline-none focus:ring-0 cursor-pointer hover:opacity-95 transition-opacity disabled:opacity-70"
+                      title="点击立即刷新画面"
+                    >
+                        <img 
+                            src={screenImage} 
+                            alt="Screen Mirror" 
+                            className="w-full h-full object-cover pointer-events-none" 
+                        />
+                    </button>
                 ) : (
                     <div className="flex flex-col items-center justify-center text-slate-600 gap-3">
                         <Loader2 size={24} className="animate-spin text-cyan-500" />
@@ -291,20 +260,6 @@ export const ScreenMirror: React.FC<ScreenMirrorProps> = ({ connected }) => {
             <button onClick={() => handleKey(187)} className="p-2 text-slate-500 hover:text-white transition-colors" title="最近任务">
                 <Square size={14} fill="currentColor" className="opacity-50" />
             </button>
-        </div>
-      )}
-
-      {analysisResult && (
-        <div className="p-4 bg-slate-900 border-t border-slate-800 max-h-48 overflow-y-auto absolute bottom-0 w-full z-30 shadow-[0_-10px_40px_rgba(0,0,0,0.5)]">
-            <div className="flex justify-between items-center mb-2">
-                <h4 className="text-xs font-bold text-purple-400 flex items-center gap-1">
-                    <Sparkles size={10} /> Gemini 分析报告
-                </h4>
-                <button onClick={() => setAnalysisResult(null)} className="text-slate-500 hover:text-white text-xs">关闭</button>
-            </div>
-            <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap font-mono">
-                {analysisResult}
-            </p>
         </div>
       )}
     </div>

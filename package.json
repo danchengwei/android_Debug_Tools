@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "bash start.sh",
+    "dev:local": "bash start-local.sh",
     "dev:raw": "vite --host 127.0.0.1",
     "dev:win": "vite --host 127.0.0.1",
     "build": "vite build",

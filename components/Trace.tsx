@@ -6,7 +6,11 @@ import { Activity, Upload, FileText, Sparkles, Loader2, Download, ChevronDown } 
 const DEFAULT_CATEGORIES = ['gfx', 'view', 'am', 'wm'];
 const ALL_CATEGORIES = ['gfx', 'view', 'am', 'wm', 'sched', 'binder_driver', 'input', 'dalvik', 'app', 'res', 'disk', 'sync', 'workq', 'memreclaim', 'freq', 'idle', 'power'];
 
-export const Trace: React.FC<{ connected: boolean }> = ({ connected }) => {
+export const Trace: React.FC<{
+  connected: boolean;
+  /** 同步 atrace 原始内容给 AI 对话侧边栏 */
+  onTraceContent?: (content: string | null) => void;
+}> = ({ connected, onTraceContent }) => {
   const [duration, setDuration] = useState(10);
   const [categories, setCategories] = useState<string[]>(DEFAULT_CATEGORIES);
   const [capturing, setCapturing] = useState(false);
@@ -27,12 +31,16 @@ export const Trace: React.FC<{ connected: boolean }> = ({ connected }) => {
     setCapturing(true);
     setAtraceRaw(null);
     setAiResult(null);
+    onTraceContent?.(null);
     try {
       const raw = await adbService.captureAtrace(duration, categories);
       setAtraceRaw(raw);
+      onTraceContent?.(raw);
     } catch (e) {
       console.error(e);
-      setAtraceRaw('抓取失败: ' + (e instanceof Error ? e.message : String(e)));
+      const errMsg = '抓取失败: ' + (e instanceof Error ? e.message : String(e));
+      setAtraceRaw(errMsg);
+      onTraceContent?.(errMsg);
     } finally {
       setCapturing(false);
     }

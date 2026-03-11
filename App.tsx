@@ -1,20 +1,23 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Box, Layers, Globe, Terminal, Cpu, Usb, AlertCircle, RefreshCw, Smartphone, Wrench, X, Sparkles, Loader2, FileArchive, Activity } from 'lucide-react';
+import { Box, Layers, Globe, Terminal, Cpu, Usb, AlertCircle, RefreshCw, Smartphone, Wrench, X, Sparkles, Loader2, FileArchive, Activity, MessageSquare } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { adbService } from './services/adbService';
-import { DeviceInfo, AppStackInfo, AppEnvInfo, H5Info, LogEntry, LayoutNode } from './types';
+import { localAdbService as adbService } from './services/localAdbService';
+import { DeviceInfo, AppStackInfo, AppEnvInfo, H5Info, LogEntry, LayoutNode, DecompileInfo } from './types';
 import { ScreenMirror } from './components/ScreenMirror';
 import { InfoPanel } from './components/InfoPanel';
 import { DevTools } from './components/DevTools';
 import { AIAutomation } from './components/AIAutomation';
 import { Decompile } from './components/Decompile';
 import { Trace } from './components/Trace';
+import { AIChatSidebar } from './components/AIChatSidebar';
 
 const App: React.FC = () => {
   const [device, setDevice] = useState<DeviceInfo | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [activeTab, setActiveTab] = useState<'stack' | 'logs' | 'tools' | 'ai' | 'decompile' | 'trace'>('stack');
-  
+  /** 已选设备、等待用户在手机上点「允许」后再继续连接 */
+  // 移除 WebUSB 相关状态
+
   // Connection Error State
   const [connError, setConnError] = useState<{
       code: string;
@@ -28,17 +31,16 @@ const App: React.FC = () => {
   const [layout, setLayout] = useState<LayoutNode | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loadingData, setLoadingData] = useState(false);
+  const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
+  const [traceContent, setTraceContent] = useState<string | null>(null);
+  const [decompileInfo, setDecompileInfo] = useState<DecompileInfo | null>(null);
 
   const isAppOpen = stackInfo && 
                     stackInfo.packageName !== 'com.android.launcher' && 
                     stackInfo.packageName !== 'com.android.systemui';
 
+  /** 连接设备 */
   const handleConnect = async () => {
-    if (!adbService.isSupported()) {
-      setConnError({ code: 'NOT_SUPPORTED', message: "您的浏览器不支持 WebUSB，请使用 Chrome 或 Edge。" });
-      return;
-    }
-
     setConnecting(true);
     setConnError(null);
     try {
@@ -46,18 +48,9 @@ const App: React.FC = () => {
       setDevice(dev);
       fetchDeviceData();
     } catch (err: any) {
-      if (err?.message === 'CANCELLED') return;
-
-      let friendlyMsg = "连接失败，请检查数据线并确保手机已开启 USB 调试。";
       const code = err?.name || 'CONNECT_ERROR';
-
-      if (err?.message?.includes('SecurityError') || code === 'SecurityError') {
-        friendlyMsg = "权限被拒绝，请在浏览器弹窗中允许访问 USB 设备。";
-      } else if (err?.message?.includes('NetworkError') || code === 'NetworkError') {
-        friendlyMsg = "WebUSB 报错（ADB 已关时多为设备需重新枚举）。请：1) 拔掉数据线，等约 3 秒再插回；2) 在手机弹窗中点「允许 USB 调试」；3) 刷新本页后再次点击「连接 USB 设备」。若仍失败可换 USB 口或数据线、关闭「Android 文件传输」等占用 USB 的程序。";
-      }
-
-      setConnError({ code, message: friendlyMsg });
+      const msg = err?.message || '';
+      setConnError({ code, message: msg || '连接失败' });
     } finally {
       setConnecting(false);
     }
@@ -96,13 +89,13 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (device) {
-      fetchDeviceData();
-      const poll = setInterval(fetchDeviceData, 5000);
+      // 仅连接后拉取一次；之后通过各面板的「刷新」按钮手动刷新
+      const firstFetchTimer = window.setTimeout(() => fetchDeviceData(), 2000);
       const unsubscribe = adbService.subscribeLogs((log) => {
         setLogs(prev => [log, ...prev].slice(0, 100));
       });
       return () => {
-        clearInterval(poll);
+        clearTimeout(firstFetchTimer);
         unsubscribe();
       };
     }
@@ -125,8 +118,20 @@ const App: React.FC = () => {
                 <div className="flex items-center gap-2 text-xs text-red-300 bg-red-950/30 px-3 py-1.5 rounded border border-red-900/40">
                     <AlertCircle size={14} />
                     <span>{connError.message}</span>
+                    <button onClick={() => setConnError(null)} className="ml-2 text-slate-400 hover:text-white transition-colors">
+                        <X size={12} />
+                    </button>
                 </div>
             )}
+
+          <button
+            onClick={() => setAiSidebarOpen(true)}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-slate-800 border border-slate-600 text-slate-200 hover:bg-slate-700 hover:text-white transition-colors"
+            title="打开 AI 调试对话"
+          >
+            <MessageSquare size={16} className="text-cyan-400" />
+            AI 对话
+          </button>
 
           {device ? (
             <motion.div 
@@ -181,32 +186,45 @@ const App: React.FC = () => {
                   <p className="text-sm text-red-200 font-medium">{connError.message}</p>
                   <p className="text-[10px] text-red-400/60 mt-2 font-mono break-all">Error Code: {connError.code}</p>
                 </div>
-                <button 
-                  onClick={() => setConnError(null)}
-                  className="w-full px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-sm font-medium transition-colors"
-                >
-                  关闭
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setConnError(null); handleConnect(); }}
+                    className="flex-1 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors"
+                  >
+                    重试连接
+                  </button>
+                  <button
+                    onClick={() => setConnError(null)}
+                    className="flex-1 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-sm font-medium transition-colors"
+                  >
+                    关闭
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
 
-      {/* Connecting Overlay */}
+      {/* 移除 WebUSB 相关等待授权弹窗 */}
+
+      {/* Connecting Overlay：先出现「连接中」，再弹出浏览器设备选择；选完设备后需在手机上点「允许」 */}
       <AnimatePresence>
         {connecting && (
-          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
+          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 backdrop-blur-sm">
             <motion.div 
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 10 }}
-              className="bg-slate-900/90 border border-slate-700 px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-4"
+              className="bg-slate-900/95 border border-slate-600 px-8 py-6 rounded-2xl shadow-2xl flex items-center gap-5 max-w-sm"
             >
-              <Loader2 className="text-cyan-400 animate-spin" size={24} />
-              <div className="flex flex-col">
-                <span className="text-white font-bold text-sm">正在连接设备...</span>
-                <span className="text-[10px] text-slate-500">请在浏览器弹窗中选择您的安卓设备</span>
+              <Loader2 className="text-cyan-400 animate-spin shrink-0" size={28} />
+              <div className="flex flex-col gap-1.5">
+                <span className="text-white font-bold">正在连接设备</span>
+                <span className="text-xs text-slate-400 leading-relaxed">
+                  ① 在浏览器弹窗中选中设备，点击「连接」<br />
+                  ② 在手机上出现「允许 USB 调试」时点击「允许」
+                </span>
               </div>
             </motion.div>
           </div>
@@ -231,7 +249,7 @@ const App: React.FC = () => {
               title="顶层 Activity" 
               icon={Layers} 
               loading={loadingData}
-              onRefresh={() => adbService.getTopActivity().then(setStackInfo)}
+              onRefresh={() => fetchDeviceData()}
             >
               {device && !isAppOpen ? (
                 <div className="h-full flex flex-col items-center justify-center text-slate-600 text-center px-4">
@@ -272,7 +290,7 @@ const App: React.FC = () => {
               title="环境信息" 
               icon={Box} 
               loading={loadingData}
-              onRefresh={() => adbService.getEnvironment(stackInfo?.packageName).then(setEnvInfo)}
+              onRefresh={() => fetchDeviceData()}
             >
               {envInfo ? (
                 <div className="space-y-3">
@@ -349,7 +367,7 @@ const App: React.FC = () => {
               title="WebView H5 调试" 
               icon={Globe} 
               loading={loadingData}
-              onRefresh={() => adbService.getH5Info(stackInfo?.packageName).then(setH5Info)}
+              onRefresh={() => fetchDeviceData()}
             >
                {h5Info && h5Info.currentUrl ? (
                 <div className="space-y-3">
@@ -468,16 +486,38 @@ const App: React.FC = () => {
                  <DevTools 
                    packageName={isAppOpen ? stackInfo?.packageName : undefined} 
                    connected={!!device}
+                   onCaptureScreen={async () => {
+                     try {
+                       return await adbService.captureScreen();
+                     } catch {
+                       return null;
+                     }
+                   }}
                  />
                )}
 
-               {activeTab === 'decompile' && <Decompile />}
+               {activeTab === 'decompile' && <Decompile onDecompileInfo={setDecompileInfo} />}
 
-               {activeTab === 'trace' && <Trace connected={!!device} />}
+               {activeTab === 'trace' && <Trace connected={!!device} onTraceContent={setTraceContent} />}
             </div>
           </div>
         </div>
       </main>
+
+      <AIChatSidebar
+        open={aiSidebarOpen}
+        onClose={() => setAiSidebarOpen(false)}
+        context={{
+          device,
+          stackInfo,
+          envInfo,
+          h5Info,
+          layout,
+          logs,
+          traceContent,
+          decompileInfo,
+        }}
+      />
     </div>
   );
 };

@@ -40,47 +40,64 @@ class AdbService {
     return !!(typeof window !== 'undefined' && window.navigator && (window.navigator as any).usb);
   }
 
-  async connect(): Promise<DeviceInfo> {
+  /** 第一步：仅请求用户选择 USB 设备，不建立 ADB 连接。选完后手机会在「继续连接」时弹出授权。 */
+  async requestDeviceOnly(): Promise<USBDevice> {
+    const usb = (window.navigator as any).usb as USB;
+    if (!usb) throw new Error('浏览器不支持 WebUSB');
+    return usb.requestDevice({ filters: [] });
+  }
+
+  /** 第二步：用已选设备建立 ADB 连接。此时手机会弹出「允许 USB 调试」，需用户点允许后重试。 */
+  async connectWithDevice(usbDevice: USBDevice): Promise<DeviceInfo> {
     const usb = (window.navigator as any).usb as USB;
     if (!usb) throw new Error('浏览器不支持 WebUSB');
 
-    try {
-      // 1. 请求用户选择 USB 设备
-      const usbDevice = await usb.requestDevice({
-        filters: [ADB_DEFAULT_DEVICE_FILTER]
-      });
+    const credentialStore = createWebCryptoCredentialStore();
+    const maxAttempts = 3;
+    let lastError: any;
 
-      // 2. 创建 Backend（必须传入 device、filters、usb 三参数，否则 connect 时可能失败）
-      const backend = new AdbWebUsbBackend(usbDevice, [ADB_DEFAULT_DEVICE_FILTER], usb);
-      const connection = await backend.connect() as unknown as AdbDaemonConnection;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const backend = new AdbWebUsbBackend(usbDevice, [ADB_DEFAULT_DEVICE_FILTER], usb);
+        const connection = await backend.connect() as unknown as AdbDaemonConnection;
+        const transport = await AdbDaemonTransport.authenticate({
+          serial: backend.serial,
+          connection,
+          credentialStore
+        });
 
-      // 3. 使用 Web Crypto 生成的密钥进行 ADB 认证（原先空密钥会导致设备拒绝）
-      const credentialStore = createWebCryptoCredentialStore();
-      const transport = await AdbDaemonTransport.authenticate({
-        serial: backend.serial,
-        connection,
-        credentialStore
-      });
+        this.device = new Adb(transport);
+        this.connected = true;
 
-      this.device = new Adb(transport);
-      this.connected = true;
-
-      // 4. 获取设备信息
-      const model = await this.getProp('ro.product.model');
-      const manufacturer = await this.getProp('ro.product.manufacturer');
-
-      return {
-        id: usbDevice.serialNumber || 'usb-device',
-        name: `${manufacturer} ${model}`.trim() || 'Android 设备',
-        model: model?.trim() || '',
-        status: 'connected',
-        batteryLevel: await this.getBatteryLevel()
-      };
-    } catch (e: any) {
-      this.connected = false;
-      this.device = null;
-      throw e;
+        const model = await this.getProp('ro.product.model');
+        const manufacturer = await this.getProp('ro.product.manufacturer');
+        return {
+          id: usbDevice.serialNumber || 'usb-device',
+          name: `${manufacturer} ${model}`.trim() || 'Android 设备',
+          model: model?.trim() || '',
+          status: 'connected',
+          batteryLevel: await this.getBatteryLevel()
+        };
+      } catch (e: any) {
+        lastError = e;
+        const isNetworkLike =
+          e?.name === 'NetworkError' ||
+          e?.message?.includes('NetworkError') ||
+          /network|transfer|failed to open/i.test(e?.message || '');
+        if (attempt < maxAttempts && isNetworkLike) {
+          await new Promise((r) => setTimeout(r, 8000));
+          continue;
+        }
+        throw e;
+      }
     }
+    throw lastError;
+  }
+
+  /** 兼容旧用法：先选设备再连接（一步完成，无「继续连接」等待） */
+  async connect(): Promise<DeviceInfo> {
+    const usbDevice = await this.requestDeviceOnly();
+    return this.connectWithDevice(usbDevice);
   }
 
   async disconnect(): Promise<void> {
@@ -311,7 +328,7 @@ class AdbService {
         break;
       }
     }
-    const blob = new Blob([buf.subarray(start)], { type: 'image/png' });
+    const blob = new Blob([new Uint8Array(buf.subarray(start))], { type: 'image/png' });
     return URL.createObjectURL(blob);
   }
 
@@ -373,6 +390,59 @@ class AdbService {
     const cmd = `atrace -t ${durationSeconds} ${cats}`;
     const raw = await this.device.subprocess.noneProtocol.spawnWaitText(cmd);
     return typeof raw === 'string' ? raw : '';
+  }
+
+  /**
+   * 将本地文件推送到设备路径。devicePath 为完整路径，如 /sdcard/Download/xxx.txt。
+   * 会先尝试 mkdir -p 父目录。
+   */
+  async pushFile(file: File, devicePath: string): Promise<void> {
+    if (!this.device) throw new Error("Not connected");
+    const dir = devicePath.replace(/\/[^/]+$/, '') || '/';
+    if (dir !== '/') {
+      await this.execShell(`mkdir -p '${dir.replace(/'/g, "'\\''")}'`);
+    }
+    const sync = await this.device.sync();
+    try {
+      await sync.write({
+        filename: devicePath,
+        file: file.stream() as any,
+      });
+    } finally {
+      await sync.dispose();
+    }
+  }
+
+  /**
+   * 从设备拉取文件，返回 Blob。devicePath 为完整路径。
+   */
+  async pullFile(devicePath: string): Promise<Blob> {
+    if (!this.device) throw new Error("Not connected");
+    const sync = await this.device.sync();
+    try {
+      const stream = sync.read(devicePath);
+      const chunks: Uint8Array[] = [];
+      const reader = stream.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) chunks.push(value instanceof Uint8Array ? value : new Uint8Array(value));
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const total = chunks.reduce((acc, c) => acc + c.length, 0);
+      const out = new Uint8Array(total);
+      let offset = 0;
+      for (const c of chunks) {
+        out.set(c, offset);
+        offset += c.length;
+      }
+      return new Blob([out]);
+    } finally {
+      await sync.dispose();
+    }
   }
 }
 

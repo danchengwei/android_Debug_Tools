@@ -198,3 +198,42 @@ export const analyzeTraceWithGemini = async (traceContentOrSummary: string): Pro
   });
   return response.text ?? "未得到有效回复。";
 };
+
+/** 调试对话中的一条消息 */
+export interface DebugChatMessage {
+  role: 'user' | 'model';
+  content: string;
+}
+
+/**
+ * 基于当前调试上下文与 AI 多轮对话。systemContext 由调用方从 device/栈/环境/布局/日志/trace/反编译 等拼成。
+ */
+export const chatWithDebugContext = async (
+  systemContext: string,
+  userMessage: string,
+  history: DebugChatMessage[] = []
+): Promise<string> => {
+  if (!process.env.API_KEY) {
+    throw new Error("API Key not found in environment variables");
+  }
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+  const systemInstruction =
+    "你是一位资深的 Android 开发与调试专家，熟悉设备信息、Activity 栈、环境配置、布局层级、logcat、systrace/atrace、反编译类列表等。用户会提供当前调试上下文的摘要，并可能追问。请根据上下文和对话历史，用中文简洁、准确地回答；若信息不足请说明。";
+
+  const parts: { text: string }[] = [];
+  for (const msg of history) {
+    parts.push({ text: `${msg.role === 'user' ? '用户' : '助手'}: ${msg.content}\n` });
+  }
+  parts.push({
+    text: `用户: ${userMessage}\n\n请根据以下上下文回答。\n\n【当前调试上下文】\n${systemContext}`,
+  });
+
+  const response = await ai.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents: { parts },
+    config: { systemInstruction },
+  });
+
+  return response.text ?? "未得到有效回复。";
+};

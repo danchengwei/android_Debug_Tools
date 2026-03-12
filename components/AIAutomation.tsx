@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Square, Loader2, Sparkles, History, CheckCircle2, AlertCircle, Send } from 'lucide-react';
-import { adbService } from '../services/adbService';
+import { localAdbService as adbService } from '../services/localAdbService';
 import { getNextAutomationAction } from '../services/geminiService';
 import { AutomationStep, AIAction } from '../types';
 

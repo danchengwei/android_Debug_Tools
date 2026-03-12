@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { adbService } from '../services/adbService';
+import { localAdbService as adbService } from '../services/localAdbService';
 import { Grid3x3, Fingerprint, Trash2, RotateCcw, Monitor, FileCode, CheckCircle2, Circle, Database, Network, Loader2, Camera, Upload, Download, FolderInput } from 'lucide-react';
 
 const DEFAULT_PUSH_PULL_DIR = '/sdcard/Download';

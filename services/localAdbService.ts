@@ -224,8 +224,9 @@ export class LocalAdbService {
       if (!response.ok) {
         throw new Error('截图失败');
       }
-      const dataUrl = await response.text();
-      return dataUrl;
+      // 直接获取二进制数据并转换为 Blob URL
+      const blob = await response.blob();
+      return URL.createObjectURL(blob);
     } catch (e) {
       throw new Error('截图失败');
     }

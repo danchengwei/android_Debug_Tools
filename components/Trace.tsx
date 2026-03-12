@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { adbService } from '../services/adbService';
+import { localAdbService as adbService } from '../services/localAdbService';
 import { analyzeTraceWithGemini } from '../services/geminiService';
 import { Activity, Upload, FileText, Sparkles, Loader2, Download, ChevronDown } from 'lucide-react';
 

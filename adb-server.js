@@ -1,5 +1,5 @@
 import express from 'express';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 const app = express();
@@ -35,32 +35,30 @@ app.get('/api/adb', (req, res) => {
   });
 });
 
+// 优化的截图 API - 使用流式传输
 app.get('/api/screen', (req, res) => {
-  try {
-    // 先在设备上截图
-    exec(`${ADB_PATH} shell screencap -p /sdcard/screen.png`, (error1) => {
-      if (error1) {
-        return res.status(500).send('截图失败');
-      }
-      
-      // 然后拉取到本地
-      exec(`${ADB_PATH} pull /sdcard/screen.png /tmp/screen.png`, (error2) => {
-        if (error2) {
-          return res.status(500).send('拉取截图失败');
-        }
-        
-        // 读取文件并转换为 base64
-        const filePath = path.join('/tmp', 'screen.png');
-        const imageBuffer = fs.readFileSync(filePath);
-        const base64Image = imageBuffer.toString('base64');
-        const dataUrl = `data:image/png;base64,${base64Image}`;
-        
-        res.send(dataUrl);
-      });
-    });
-  } catch (error) {
-    res.status(500).send('截图处理失败');
-  }
+  // 使用 spawn 而不是 exec，避免缓冲区问题
+  const screenshotProcess = spawn(ADB_PATH, ['shell', 'screencap', '-p']);
+  
+  let dataBuffer = Buffer.alloc(0);
+  
+  screenshotProcess.stdout.on('data', (data) => {
+    dataBuffer = Buffer.concat([dataBuffer, data]);
+  });
+  
+  screenshotProcess.on('close', (code) => {
+    if (code !== 0) {
+      return res.status(500).send('截图失败');
+    }
+    
+    // 直接发送二进制数据，前端使用 Blob URL
+    res.setHeader('Content-Type', 'image/png');
+    res.send(dataBuffer);
+  });
+  
+  screenshotProcess.stderr.on('data', (data) => {
+    console.error('截图错误:', data.toString());
+  });
 });
 
 // 启动服务器

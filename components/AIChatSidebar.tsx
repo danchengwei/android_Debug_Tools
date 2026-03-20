@@ -24,8 +24,9 @@ function buildSystemContext(ctx: AIChatSidebarContext): string {
   const sections: string[] = [];
 
   if (ctx.device) {
+    const extra = [ctx.device.multiDeviceHint].filter(Boolean).join('\n');
     sections.push(
-      `【设备】\n${ctx.device.name} (${ctx.device.model}), 状态: ${ctx.device.status}, 电量: ${ctx.device.batteryLevel}%`
+      `【设备】\n名称: ${ctx.device.name}\n型号: ${ctx.device.model}\nADB 序列号: ${ctx.device.serial}\n状态: ${ctx.device.status}, 电量: ${ctx.device.batteryLevel}%${extra ? `\n${extra}` : ''}`
     );
   } else {
     sections.push('【设备】未连接');
@@ -33,7 +34,7 @@ function buildSystemContext(ctx: AIChatSidebarContext): string {
 
   if (ctx.stackInfo) {
     sections.push(
-      `【顶层 Activity】\n包名: ${ctx.stackInfo.packageName}\nActivity: ${ctx.stackInfo.activityName}\n任务 ID: ${ctx.stackInfo.taskId}\n前台: ${ctx.stackInfo.isRunning}`
+      `【顶层 Activity】\n包名: ${ctx.stackInfo.packageName}\nActivity: ${ctx.stackInfo.activityName}\n任务 ID: ${ctx.stackInfo.taskId}\n前台: ${ctx.stackInfo.isRunning}${ctx.stackInfo.topActivityRawLine ? `\n原始行: ${ctx.stackInfo.topActivityRawLine}` : ''}`
     );
   } else {
     sections.push('【顶层 Activity】未获取（请点击信息区刷新）');
@@ -57,8 +58,13 @@ function buildSystemContext(ctx: AIChatSidebarContext): string {
 
   if (ctx.h5Info) {
     const h5 = ctx.h5Info;
+    const cand =
+      h5.urlCandidates && h5.urlCandidates.length > 0
+        ? `\n候选地址（dumpsys 解析）:\n${h5.urlCandidates.map((u, i) => `  ${i + 1}. ${u}`).join('\n')}`
+        : '';
+    const wvUa = h5.webViewUserAgent ? `\nWebView UA: ${h5.webViewUserAgent}` : '';
     sections.push(
-      `【H5 / WebView】\nURL: ${h5.currentUrl ?? '无'}\n标题: ${h5.pageTitle ?? '无'}\nUA: ${h5.userAgent || '无'}`
+      `【H5 / WebView】\n主 URL: ${h5.currentUrl ?? '无'}\n标题: ${h5.pageTitle ?? '无'}\nUA: ${h5.userAgent || '无'}${wvUa}${cand}`
     );
   } else {
     sections.push('【H5 / WebView】未获取（请点击信息区刷新）');

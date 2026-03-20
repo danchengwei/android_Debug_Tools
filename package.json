@@ -4,7 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "bash start.sh",
+    "start": "node scripts/start-all.mjs",
+    "dev": "node scripts/start-all.mjs",
+    "dev:run": "concurrently -n bridge,vite,scrcpy -c cyan,green,magenta \"node adb-server.js\" \"vite --host 127.0.0.1\" \"node scrcpy-server.js\"",
+    "dev:lite": "node scripts/start-all.mjs --lite",
+    "dev:lite:run": "concurrently -k -n bridge,vite -c cyan,green \"node adb-server.js\" \"vite --host 127.0.0.1\"",
+    "dev:bridge": "node adb-server.js",
+    "dev:suppress-adb": "bash start.sh",
     "dev:local": "bash start-local.sh",
     "dev:raw": "vite --host 127.0.0.1",
     "dev:win": "vite --host 127.0.0.1",
@@ -31,6 +37,7 @@
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.2.1",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }

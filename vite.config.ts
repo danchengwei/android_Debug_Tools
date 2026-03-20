@@ -8,6 +8,8 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        /** 端口被占用时直接失败并提示，避免静默换端口导致误以为「服务没起来」 */
+        strictPort: true,
       },
       plugins: [react()],
       define: {

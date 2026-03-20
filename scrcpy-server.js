@@ -2,11 +2,31 @@
 // Scrcpy WebSocket 服务器
 import * as WebSocket from 'ws';
 import { spawn, exec } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 import http from 'http';
 import net from 'net';
 
-const PORT = 9999;
-const SCRCPY_PATH = '/opt/homebrew/bin/scrcpy';
+const PORT = 13377;
+const HTTP_PORT = PORT + 1; // HTTP 健康检查使用不同端口
+
+/** 环境变量 SCRCPY_PATH > 常见路径 > PATH 中的 scrcpy */
+function resolveScrcpyPath() {
+  const envPath = process.env.SCRCPY_PATH;
+  if (envPath && fs.existsSync(envPath)) return envPath;
+  const candidates = [
+    '/opt/homebrew/bin/scrcpy',
+    '/usr/local/bin/scrcpy',
+    path.join(process.env.HOME || '', 'scrcpy/scrcpy'),
+  ];
+  for (const c of candidates) {
+    if (c && fs.existsSync(c)) return c;
+  }
+  return 'scrcpy';
+}
+
+const SCRCPY_PATH = resolveScrcpyPath();
+console.log('[scrcpy-server] 使用 scrcpy:', SCRCPY_PATH);
 let scrcpyProcess = null;
 let isRunning = false;
 let deviceWidth = 1080;
@@ -33,9 +53,11 @@ async function startScrcpyServer() {
   console.log('正在启动 Scrcpy 服务器...');
   
   try {
-    // 先停止可能存在的 Scrcpy 实例
-    await execAsync('pkill -f scrcpy || true');
-    await new Promise(r => setTimeout(r, 1000));
+    // 先停止可能存在的 Scrcpy 实例（Windows 无 pkill，跳过）
+    if (process.platform !== 'win32') {
+      await execAsync('pkill -f scrcpy || true');
+      await new Promise((r) => setTimeout(r, 1000));
+    }
     
     // 获取设备分辨率
     try {
@@ -50,22 +72,19 @@ async function startScrcpyServer() {
       console.log('使用默认分辨率 1080x1920');
     }
     
-    // 启动 Scrcpy，使用 TCP 模式
+    // 启动 Scrcpy，使用基本模式
+    // 略降码率与边长，减轻编码/网络/解码排队，体感延迟更低（需更清晰可调回 8M / 1920）
     scrcpyProcess = spawn(SCRCPY_PATH, [
-      '--tcpip=localhost:27183',
-      '--no-control',
-      '--no-display',
+      '--video-bit-rate=4M',
+      '--max-size=1280',
       '--max-fps=60',
-      '--bit-rate=8M',
-      '--max-size=1920',
-      '--lock-video-orientation=0',
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ADB_SERVER_SOCKET_ADDRESS: 'tcp:localhost:5037' }
     });
     
     scrcpyProcess.stdout.on('data', (data) => {
-      console.log(`[Scrcpy] ${data.toString()}`);
+      console.log(`[Scrcpy] 收到视频数据: ${data.length} 字节`);
     });
     
     scrcpyProcess.stderr.on('data', (data) => {
@@ -103,7 +122,7 @@ wss.on('connection', (ws) => {
     height: deviceHeight
   }));
   
-  // 连接到 Scrcpy TCP 流
+  // 连接到 Scrcpy TCP 流（默认端口 27183）
   const client = new net.Socket();
   
   client.connect(27183, 'localhost', () => {
@@ -160,9 +179,9 @@ const httpServer = http.createServer((req, res) => {
   }));
 });
 
-httpServer.listen(PORT, () => {
+httpServer.listen(HTTP_PORT, () => {
   console.log(`Scrcpy WebSocket 服务器运行在 ws://localhost:${PORT}`);
-  console.log(`健康检查: http://localhost:${PORT}`);
+  console.log(`健康检查: http://localhost:${HTTP_PORT}`);
   // 启动 Scrcpy 服务器
   startScrcpyServer();
 });

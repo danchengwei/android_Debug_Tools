@@ -1,9 +1,13 @@
 export interface DeviceInfo {
+  /** ADB 序列号（usb / 无线调试），用于区分多台设备 */
+  serial: string;
   id: string;
   name: string;
   model: string;
   status: 'connected' | 'disconnected' | 'unauthorized';
   batteryLevel: number;
+  /** 多台 device 在线时提示当前选用哪一台 */
+  multiDeviceHint?: string;
 }
 
 export interface AppStackInfo {
@@ -11,6 +15,8 @@ export interface AppStackInfo {
   activityName: string;
   taskId: number;
   isRunning: boolean;
+  /** 设备上 dumpsys 返回的原始首行，便于对照命令输出 */
+  topActivityRawLine?: string;
 }
 
 export interface AppEnvInfo {
@@ -29,9 +35,15 @@ export interface AppEnvInfo {
 }
 
 export interface H5Info {
+  /** 推断的主访问地址（完整 URL，含 query/hash，尽力从 dumpsys 还原） */
   currentUrl: string | null;
   pageTitle: string | null;
+  /** 用于 AI 上下文等；若解析到 WebView UA 则优先，否则为设备侧占位 UA */
   userAgent: string;
+  /** 从 activity / window 等 dumpsys 中解析到的候选地址（去重），便于核对长链接、多跳转场景 */
+  urlCandidates?: string[];
+  /** dumpsys 中出现的 WebView User-Agent（若有） */
+  webViewUserAgent?: string | null;
 }
 
 export interface LayoutNode {

@@ -8,12 +8,14 @@ interface InfoPanelProps {
   children: React.ReactNode;
   action?: React.ReactNode;
   onRefresh?: () => void;
+  /** 根容器额外 class，用于栅格内统一高度等 */
+  className?: string;
 }
 
-export const InfoPanel: React.FC<InfoPanelProps> = ({ title, icon: Icon, loading, children, action, onRefresh }) => {
+export const InfoPanel: React.FC<InfoPanelProps> = ({ title, icon: Icon, loading, children, action, onRefresh, className }) => {
   return (
-    <div className="bg-slate-900 rounded-xl border border-slate-800 shadow-md flex flex-col h-full">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800 bg-slate-850/50">
+    <div className={`bg-slate-900/80 rounded-xl border border-slate-800/90 shadow-md shadow-black/20 flex flex-col h-full min-h-0 backdrop-blur-sm ${className ?? ''}`}>
+      <div className="flex items-center justify-between px-3 sm:px-4 py-2.5 border-b border-slate-800/90 bg-slate-900/60 shrink-0">
         <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
           <Icon size={16} className="text-cyan-500" />
           {title}
@@ -32,7 +34,7 @@ export const InfoPanel: React.FC<InfoPanelProps> = ({ title, icon: Icon, loading
           {action && <div>{action}</div>}
         </div>
       </div>
-      <div className="p-4 flex-1 overflow-auto">
+      <div className="p-3 sm:p-4 flex-1 overflow-auto min-h-0">
         {loading ? (
           <div className="h-full flex items-center justify-center">
              <div className="w-4 h-4 border-2 border-slate-600 border-t-cyan-400 rounded-full animate-spin"></div>

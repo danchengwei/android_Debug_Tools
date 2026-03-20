@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 启动服务时：全局关闭 ADB 并持续压制，保证 WebUSB 独占设备。
 # 终止服务时：恢复本地 ADB 守护进程。
-# macOS/Linux 专用。运行: npm run dev
+# macOS/Linux 专用。运行: npm run dev:suppress-adb（默认 npm run dev 不再动本地 ADB）
 
 set -e
 KILLER_PID=""

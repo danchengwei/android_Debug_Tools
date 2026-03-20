@@ -25,4 +25,4 @@ echo "已关闭本地 ADB 守护进程（全局生效）。"
 KILLER_PID=$!
 
 echo "服务运行期间将持续压制 ADB，其他终端也无法占用设备。退出服务后将自动恢复 ADB。"
-npx vite --host 127.0.0.1
+npx vite

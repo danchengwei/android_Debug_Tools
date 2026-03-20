@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Box, Layers, Globe, Terminal, Cpu, Usb, AlertCircle, RefreshCw, Smartphone, Wrench, X, Sparkles, Loader2, FileArchive, Activity, MessageSquare, Link2, LogOut, Copy, Check } from 'lucide-react';
+import { Box, Layers, Terminal, Cpu, Usb, AlertCircle, RefreshCw, Smartphone, Wrench, X, Sparkles, Loader2, FileArchive, Activity, MessageSquare, Link2, LogOut } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { localAdbService as adbService } from './services/localAdbService';
 import { parseSchemeInput } from './services/schemeParse';
-import { DeviceInfo, AppStackInfo, AppEnvInfo, H5Info, LogEntry, LayoutNode, DecompileInfo } from './types';
+import { DeviceInfo, AppStackInfo, AppEnvInfo, LogEntry, LayoutNode, DecompileInfo } from './types';
 import { ScreenMirror } from './components/ScreenMirror';
 import { InfoPanel } from './components/InfoPanel';
 import { DevTools } from './components/DevTools';
@@ -11,6 +11,14 @@ import { AIAutomation } from './components/AIAutomation';
 import { Decompile } from './components/Decompile';
 import { Trace } from './components/Trace';
 import { AIChatSidebar } from './components/AIChatSidebar';
+
+/** 常见内置浏览器 / WebView 容器 Activity，此时用 Chrome Inspect 调试 H5 */
+const OTHER_PROCESS_BROWSER_ACTIVITY = 'OtherProcessBrowserActivity';
+
+function isOtherProcessBrowserActivity(activityName: string | undefined | null): boolean {
+  if (!activityName) return false;
+  return activityName.includes(OTHER_PROCESS_BROWSER_ACTIVITY);
+}
 
 const App: React.FC = () => {
   const [device, setDevice] = useState<DeviceInfo | null>(null);
@@ -28,7 +36,6 @@ const App: React.FC = () => {
   // Data States
   const [stackInfo, setStackInfo] = useState<AppStackInfo | null>(null);
   const [envInfo, setEnvInfo] = useState<AppEnvInfo | null>(null);
-  const [h5Info, setH5Info] = useState<H5Info | null>(null);
   const [layout, setLayout] = useState<LayoutNode | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loadingData, setLoadingData] = useState(false);
@@ -40,8 +47,8 @@ const App: React.FC = () => {
   const [schemeTargetPackage, setSchemeTargetPackage] = useState<string>('');
   const [schemeResult, setSchemeResult] = useState<string | null>(null);
   const [schemeTesting, setSchemeTesting] = useState<boolean>(false);
-  /** WebView 完整 URL 复制反馈 */
-  const [h5UrlCopied, setH5UrlCopied] = useState(false);
+  /** 顶层为浏览器壳时，由本机桥接打开 Chrome inspect */
+  const [openingChromeInspect, setOpeningChromeInspect] = useState(false);
 
   const isAppOpen = stackInfo && 
                     stackInfo.packageName !== 'com.android.launcher' && 
@@ -54,7 +61,7 @@ const App: React.FC = () => {
     try {
       const dev = await adbService.connect();
       setDevice(dev);
-      fetchDeviceData();
+      /** 不在此处调 fetchDeviceData：setState 异步，闭包里 device 仍为 null。改由 useEffect(device) 拉取。 */
     } catch (err: unknown) {
       const e = err instanceof Error ? err : new Error(String(err));
       let code = e.name || 'CONNECT_ERROR';
@@ -66,7 +73,7 @@ const App: React.FC = () => {
       ) {
         code = '桥接不可用';
         msg =
-          '无法访问本机 ADB 桥接（端口 3003）。请确认：① 已在项目目录执行 npm start（或 npm run dev:bridge / node adb-server.js）；② 终端里出现「ADB server running」；③ 若用手机通过电脑 IP 打开页面，桥接已监听 0.0.0.0，可尝试在电脑浏览器打开同一地址重试。';
+          '无法连接本机调试服务。请先在电脑上双击「启动调试工具」完成启动（或按交付说明启动），并保持弹出的命令行窗口不要关；窗口内出现「ADB server running」表示服务已起来。若用手机访问本页，请与电脑处于同一局域网，必要时先在电脑浏览器打开本工具确认正常。';
       }
       setConnError({ code, message: msg });
     } finally {
@@ -79,55 +86,51 @@ const App: React.FC = () => {
     setDevice(null);
     setStackInfo(null);
     setEnvInfo(null);
-    setH5Info(null);
+    setLayout(null);
     setLogs([]);
+    setTraceContent(null);
+    setDecompileInfo(null);
+    setSchemeResult(null);
+    setSchemeTesting(false);
+    setLoadingData(false);
+    setActiveTab('stack');
   };
+
+  /** 针对指定设备拉取栈/环境/布局（含写回序列号，避免热更新后单例丢失 serial） */
+  const loadDeviceData = useCallback(async (dev: DeviceInfo) => {
+    adbService.rebindDeviceSerial(dev.serial);
+    setLoadingData(true);
+    try {
+      const stack = await adbService.getTopActivity();
+      setStackInfo(stack);
+      const pkg = stack?.packageName;
+      const [env, layoutData] = await Promise.all([
+        adbService.getEnvironment(pkg),
+        adbService.getLayoutHierarchy(),
+      ]);
+      setEnvInfo(env);
+      setLayout(layoutData);
+    } catch (e) {
+      console.error('Error fetching data', e);
+    } finally {
+      setLoadingData(false);
+    }
+  }, []);
 
   const fetchDeviceData = useCallback(async () => {
     if (!device) return;
-    setLoadingData(true);
-    setH5UrlCopied(false);
-    try {
-        const stack = await adbService.getTopActivity();
-        setStackInfo(stack);
-        const pkg = stack?.packageName;
-        const [env, h5, layoutData] = await Promise.all([
-            adbService.getEnvironment(pkg),
-            adbService.getH5Info(pkg),
-            adbService.getLayoutHierarchy()
-        ]);
-        setEnvInfo(env);
-        setH5Info(h5);
-        setLayout(layoutData);
-    } catch (e) {
-        console.error("Error fetching data", e);
-    } finally {
-        setLoadingData(false);
-    }
-  }, [device]);
+    await loadDeviceData(device);
+  }, [device, loadDeviceData]);
 
-  const copyH5Url = useCallback(async (text: string) => {
-    const t = text.trim();
-    if (!t) return;
+  const openChromeInspectOnDesktop = useCallback(async () => {
+    setOpeningChromeInspect(true);
     try {
-      await navigator.clipboard.writeText(t);
-      setH5UrlCopied(true);
-      window.setTimeout(() => setH5UrlCopied(false), 2000);
-    } catch {
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = t;
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-        setH5UrlCopied(true);
-        window.setTimeout(() => setH5UrlCopied(false), 2000);
-      } catch {
-        /* 忽略 */
+      const ok = await adbService.openDesktopChromeInspect();
+      if (!ok) {
+        window.alert('未能从本机打开 Chrome。请确认：① 本工具桥接已启动；② 已安装 Google Chrome；③ macOS 上 Chrome 在「应用程序」中的名称为 Google Chrome。');
       }
+    } finally {
+      setOpeningChromeInspect(false);
     }
   }, []);
 
@@ -153,18 +156,16 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    if (device) {
-      // 仅连接后拉取一次；之后通过各面板的「刷新」按钮手动刷新
-      const firstFetchTimer = window.setTimeout(() => fetchDeviceData(), 2000);
-      const unsubscribe = adbService.subscribeLogs((log) => {
-        setLogs(prev => [log, ...prev].slice(0, 100));
-      });
-      return () => {
-        clearTimeout(firstFetchTimer);
-        unsubscribe();
-      };
-    }
-  }, [device, fetchDeviceData]);
+    if (!device) return;
+    adbService.rebindDeviceSerial(device.serial);
+    void loadDeviceData(device);
+    const unsubscribe = adbService.subscribeLogs((log) => {
+      setLogs((prev) => [log, ...prev].slice(0, 100));
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [device, loadDeviceData]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col font-sans antialiased">
@@ -310,7 +311,13 @@ const App: React.FC = () => {
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-12 xl:gap-8">
           {/* 左侧：屏幕镜像，大屏下随滚动固定 */}
           <aside className="order-1 flex min-h-0 min-w-0 flex-col xl:order-none xl:col-span-4 xl:sticky xl:top-[4.5rem] xl:max-h-[calc(100vh-4.5rem)] xl:self-start xl:overflow-y-auto">
-            <ScreenMirror connected={!!device} device={device} />
+            <ScreenMirror
+              key={device ? device.serial : 'disconnected'}
+              connected={!!device}
+              device={device}
+              onRequestConnect={handleConnect}
+              connecting={connecting}
+            />
           </aside>
 
           {/* 右侧：信息 + Scheme + 工作区 */}
@@ -321,7 +328,7 @@ const App: React.FC = () => {
                 设备信息
                 <span className="h-px min-w-[1rem] flex-1 bg-slate-800" aria-hidden />
               </h2>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5 xl:grid-cols-3">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
             <InfoPanel 
               title="顶层 Activity" 
               icon={Layers} 
@@ -340,12 +347,25 @@ const App: React.FC = () => {
                     <div className="flex flex-col items-center justify-center text-slate-600 text-center px-2 py-4">
                         <Layers size={24} className="mb-2 opacity-30" />
                         <span className="text-xs">无 App 打开</span>
-                        <span className="text-[10px] mt-1 opacity-50">(当前位于桌面或锁屏)</span>
                     </div>
                   ) : stackInfo ? (
                     <div className="space-y-3">
                       <div>
-                        <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">Activity 类名</span>
+                        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">Activity 类名</span>
+                          {isOtherProcessBrowserActivity(stackInfo.activityName) ? (
+                            <button
+                              type="button"
+                              disabled={openingChromeInspect}
+                              onClick={() => void openChromeInspectOnDesktop()}
+                              title="由本机桥接唤起 Chrome 的 chrome://inspect，用于调试当前 WebView"
+                              className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-600/80 bg-slate-800/50 px-2 py-0.5 text-[10px] text-slate-300 hover:border-cyan-700/50 hover:bg-slate-800/70 disabled:opacity-50"
+                            >
+                              {openingChromeInspect ? <Loader2 size={10} className="animate-spin shrink-0" /> : null}
+                              打开 Chrome Inspect
+                            </button>
+                          ) : null}
+                        </div>
                         <p className="text-sm font-mono text-cyan-300 break-all">{stackInfo.activityName.split('.').pop()}</p>
                       </div>
                       <div>
@@ -360,14 +380,6 @@ const App: React.FC = () => {
                            任务 ID: {stackInfo.taskId}
                          </span>
                       </div>
-                      {stackInfo.topActivityRawLine ? (
-                        <div className="pt-2 border-t border-slate-800">
-                          <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">dumpsys 原始首行</span>
-                          <p className="text-[10px] font-mono text-slate-500 break-all mt-1 leading-relaxed" title={stackInfo.topActivityRawLine}>
-                            {stackInfo.topActivityRawLine}
-                          </p>
-                        </div>
-                      ) : null}
                     </div>
                   ) : (
                     <div className="flex flex-col items-center justify-center text-slate-600 text-center px-4 py-6">
@@ -456,99 +468,6 @@ const App: React.FC = () => {
                 </div>
               )}
             </InfoPanel>
-
-            <InfoPanel 
-              title="WebView H5 调试" 
-              icon={Globe} 
-              loading={loadingData}
-              onRefresh={() => fetchDeviceData()}
-              className="min-h-[13rem] sm:min-h-[15rem] sm:col-span-2 xl:col-span-1"
-            >
-               {h5Info && (h5Info.currentUrl || (h5Info.urlCandidates && h5Info.urlCandidates.length > 0)) ? (
-                <div className="space-y-3">
-                  <div>
-                    <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">页面标题</span>
-                    <p className="text-sm font-medium text-slate-200 line-clamp-2" title={h5Info.pageTitle ?? ''}>
-                      {h5Info.pageTitle ?? '（无标题）'}
-                    </p>
-                  </div>
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">
-                        完整访问地址
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => copyH5Url(h5Info.currentUrl ?? h5Info.urlCandidates?.[0] ?? '')}
-                        className="flex items-center gap-1 rounded border border-slate-700 bg-slate-800/80 px-2 py-1 text-[10px] text-slate-300 transition-colors hover:border-cyan-600/50 hover:text-cyan-300"
-                        title="复制完整 URL（含参数）"
-                      >
-                        {h5UrlCopied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
-                        {h5UrlCopied ? '已复制' : '复制'}
-                      </button>
-                    </div>
-                    <div className="mt-1 max-h-36 overflow-y-auto rounded border border-slate-800 bg-slate-950 p-2">
-                      <p className="text-xs font-mono text-cyan-300 break-all leading-relaxed whitespace-pre-wrap select-text">
-                        {h5Info.currentUrl ?? h5Info.urlCandidates?.[0]}
-                      </p>
-                    </div>
-                    <p className="mt-1 text-[9px] leading-relaxed text-slate-600">
-                      由 <code className="text-slate-500">dumpsys activity</code> / window 多段输出解析，长链接与 query 会尽量保留；若壳包自定义字段不同，可看下方候选列表核对。
-                    </p>
-                  </div>
-                  {h5Info.webViewUserAgent ? (
-                    <div>
-                      <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">WebView UA</span>
-                      <p className="mt-1 max-h-20 overflow-y-auto break-all rounded border border-slate-800/80 bg-slate-950/80 p-2 font-mono text-[10px] text-slate-400 select-text">
-                        {h5Info.webViewUserAgent}
-                      </p>
-                    </div>
-                  ) : null}
-                  {h5Info.urlCandidates && h5Info.urlCandidates.length > 1 ? (
-                    <details className="rounded border border-slate-800 bg-slate-950/50 text-left">
-                      <summary className="cursor-pointer select-none px-2 py-1.5 text-[10px] font-medium text-slate-400">
-                        全部解析地址（共 {h5Info.urlCandidates.length} 条，含主地址）
-                      </summary>
-                      <ul className="max-h-32 space-y-1 overflow-y-auto border-t border-slate-800 p-2">
-                        {h5Info.urlCandidates.map((u, idx) => (
-                          <li key={`${idx}-${u.slice(0, 48)}`} className="flex gap-1 text-[10px]">
-                            <span className="w-7 shrink-0 text-slate-600">{idx === 0 ? '主' : idx + 1}</span>
-                            <button
-                              type="button"
-                              onClick={() => copyH5Url(u)}
-                              className="shrink-0 rounded px-1 text-slate-500 hover:bg-slate-800 hover:text-cyan-400"
-                              title="复制完整链接"
-                            >
-                              <Copy size={10} />
-                            </button>
-                            <span className="min-w-0 break-all font-mono text-slate-400">{u}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </details>
-                  ) : null}
-                  {h5Info.currentUrl && /^https?:\/\//i.test(h5Info.currentUrl) ? (
-                    <a
-                      href={h5Info.currentUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center justify-end gap-1 text-[10px] text-cyan-500 hover:text-cyan-400 hover:underline"
-                    >
-                      在桌面浏览器中打开 &rarr;
-                    </a>
-                  ) : null}
-                  <p className="text-center text-[9px] text-slate-600">
-                    测试跳转请用下方「Scheme / Deep Link」。无地址时请点面板右上角刷新或确认前台为含 WebView 的页面。
-                  </p>
-                </div>
-               ) : (
-                <div className="h-full flex flex-col items-center justify-center text-slate-600 text-center px-4">
-                   <Globe size={24} className="mb-2 opacity-30" />
-                   <span className="text-xs">未检测到 WebView / H5 地址</span>
-                  <span className="mt-1 text-[10px] text-slate-600">请打开内置网页后点击刷新</span>
-                </div>
-               )}
-            </InfoPanel>
               </div>
             </section>
 
@@ -566,11 +485,6 @@ const App: React.FC = () => {
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    <p className="text-[10px] leading-relaxed text-slate-500">
-                      输入 scheme 或 https，先解析再执行{' '}
-                      <code className="rounded bg-slate-950 px-1 py-0.5 text-slate-400">am start -a VIEW -d</code>
-                      ；可选包名追加 <code className="rounded bg-slate-950 px-1 py-0.5 text-slate-400">-p</code>。
-                    </p>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-12 md:items-end">
                       <div className="md:col-span-5">
                         <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">链接</label>
@@ -704,6 +618,9 @@ const App: React.FC = () => {
                  <DevTools 
                    packageName={isAppOpen ? stackInfo?.packageName : undefined} 
                    connected={!!device}
+                   device={device}
+                   stackInfo={stackInfo}
+                   envInfo={envInfo}
                    onCaptureScreen={async () => {
                      try {
                        return await adbService.captureScreen();
@@ -730,7 +647,7 @@ const App: React.FC = () => {
           device,
           stackInfo,
           envInfo,
-          h5Info,
+          h5Info: null,
           layout,
           logs,
           traceContent,

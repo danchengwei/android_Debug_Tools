@@ -53,7 +53,7 @@ echo "所有服务启动成功！"
 
 # 启动 Vite 开发服务器
 echo "启动 Vite 开发服务器..."
-npx vite --host 127.0.0.1
+npx vite
 
 # 当 Vite 开发服务器退出时，终止所有后台服务
 echo "正在停止服务..."

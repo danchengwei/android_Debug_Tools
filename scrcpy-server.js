@@ -1,16 +1,21 @@
 #!/usr/bin/env node
-// Scrcpy WebSocket 服务器
-import * as WebSocket from 'ws';
+/**
+ * 自动拉起本机 Scrcpy 原生窗口（真·流畅），无需用户在终端手动执行 scrcpy。
+ * 不在此进程内连接 27183，避免与 Scrcpy 抢占视频隧道导致黑屏/失败。
+ *
+ * HTTP **13377**：健康检查 + 供前端探测「原生 Scrcpy 是否已启动」（CORS 允许浏览器从 3000 访问）。
+ *
+ * 环境变量：
+ * - SCRCPY_PATH：scrcpy 可执行文件路径
+ * - SCRCPY_EXTRA_ARGS：额外参数，空格分隔，如 "--stay-awake --turn-screen-off"
+ */
 import { spawn, exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
-import net from 'net';
 
-const PORT = 13377;
-const HTTP_PORT = PORT + 1; // HTTP 健康检查使用不同端口
+const HTTP_PORT = 13377;
 
-/** 环境变量 SCRCPY_PATH > 常见路径 > PATH 中的 scrcpy */
 function resolveScrcpyPath() {
   const envPath = process.env.SCRCPY_PATH;
   if (envPath && fs.existsSync(envPath)) return envPath;
@@ -27,15 +32,17 @@ function resolveScrcpyPath() {
 
 const SCRCPY_PATH = resolveScrcpyPath();
 console.log('[scrcpy-server] 使用 scrcpy:', SCRCPY_PATH);
+
 let scrcpyProcess = null;
-let isRunning = false;
 let deviceWidth = 1080;
 let deviceHeight = 1920;
+/** 当前子进程是否在运行（退出后为 false，直至下次拉起成功） */
+let nativeScrcpyRunning = false;
+let restartTimer = null;
 
-// 执行命令
 function execAsync(cmd) {
   return new Promise((resolve, reject) => {
-    exec(cmd, (error, stdout, stderr) => {
+    exec(cmd, { maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         reject(error);
         return;
@@ -45,152 +52,170 @@ function execAsync(cmd) {
   });
 }
 
-// 启动 Scrcpy 服务器
-async function startScrcpyServer() {
-  if (isRunning) return;
-  isRunning = true;
-  
-  console.log('正在启动 Scrcpy 服务器...');
-  
+function parseExtraArgs() {
+  const raw = (process.env.SCRCPY_EXTRA_ARGS || '').trim();
+  if (!raw) return [];
+  return raw.split(/\s+/).filter(Boolean);
+}
+
+async function refreshDeviceSize() {
   try {
-    // 先停止可能存在的 Scrcpy 实例（Windows 无 pkill，跳过）
-    if (process.platform !== 'win32') {
-      await execAsync('pkill -f scrcpy || true');
-      await new Promise((r) => setTimeout(r, 1000));
+    const { stdout } = await execAsync('adb shell wm size');
+    const match = stdout.match(/(\d+)x(\d+)/);
+    if (match) {
+      deviceWidth = parseInt(match[1], 10);
+      deviceHeight = parseInt(match[2], 10);
+      console.log(`[scrcpy-server] 设备分辨率: ${deviceWidth}x${deviceHeight}`);
     }
-    
-    // 获取设备分辨率
-    try {
-      const { stdout } = await execAsync('adb shell wm size');
-      const match = stdout.match(/(\d+)x(\d+)/);
-      if (match) {
-        deviceWidth = parseInt(match[1]);
-        deviceHeight = parseInt(match[2]);
-        console.log(`设备分辨率: ${deviceWidth}x${deviceHeight}`);
-      }
-    } catch (e) {
-      console.log('使用默认分辨率 1080x1920');
-    }
-    
-    // 启动 Scrcpy，使用基本模式
-    // 略降码率与边长，减轻编码/网络/解码排队，体感延迟更低（需更清晰可调回 8M / 1920）
-    scrcpyProcess = spawn(SCRCPY_PATH, [
-      '--video-bit-rate=4M',
-      '--max-size=1280',
-      '--max-fps=60',
-    ], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ADB_SERVER_SOCKET_ADDRESS: 'tcp:localhost:5037' }
-    });
-    
-    scrcpyProcess.stdout.on('data', (data) => {
-      console.log(`[Scrcpy] 收到视频数据: ${data.length} 字节`);
-    });
-    
-    scrcpyProcess.stderr.on('data', (data) => {
-      console.error(`[Scrcpy] ${data.toString()}`);
-    });
-    
-    scrcpyProcess.on('close', (code) => {
-      console.log(`Scrcpy 退出，代码: ${code}`);
-      isRunning = false;
-      // 5 秒后重新启动
-      setTimeout(startScrcpyServer, 5000);
-    });
-    
-    // 等待 3 秒让 Scrcpy 启动
-    await new Promise(r => setTimeout(r, 3000));
-    
-  } catch (error) {
-    console.error('Scrcpy 启动失败:', error);
-    isRunning = false;
-    // 5 秒后重试
-    setTimeout(startScrcpyServer, 5000);
+  } catch {
+    console.log('[scrcpy-server] 使用默认分辨率 1080x1920');
   }
 }
 
-// 创建 WebSocket 服务器
-const wss = new WebSocket.WebSocketServer({ port: PORT });
+function killRestartTimer() {
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
+}
 
-wss.on('connection', (ws) => {
-  console.log('新的 WebSocket 客户端连接');
-  
-  // 发送连接成功消息
-  ws.send(JSON.stringify({
-    type: 'connected',
-    width: deviceWidth,
-    height: deviceHeight
-  }));
-  
-  // 连接到 Scrcpy TCP 流（默认端口 27183）
-  const client = new net.Socket();
-  
-  client.connect(27183, 'localhost', () => {
-    console.log('已连接到 Scrcpy TCP 流');
-  });
-  
-  client.on('data', (data) => {
-    // 转发视频流数据
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(data);
-    }
-  });
-  
-  client.on('close', () => {
-    console.log('TCP 连接已关闭');
-  });
-  
-  client.on('error', (error) => {
-    console.error('TCP 连接错误:', error);
-  });
-  
-  ws.on('message', (message) => {
+function scheduleRestartScrcpy() {
+  killRestartTimer();
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    void launchNativeScrcpy();
+  }, 5000);
+}
+
+/**
+ * 启动原生 Scrcpy（子进程）。由 npm start 自动执行，用户无需手动开终端。
+ */
+async function launchNativeScrcpy() {
+  if (scrcpyProcess && !scrcpyProcess.killed) {
+    return;
+  }
+
+  console.log('[scrcpy-server] 正在自动启动本机 Scrcpy 窗口（流畅投屏）…');
+
+  if (process.platform !== 'win32') {
     try {
-      const msg = JSON.parse(message);
-      if (msg.type === 'ping') {
-        ws.send(JSON.stringify({ type: 'pong' }));
-      }
-    } catch (e) {
-      console.log('收到消息:', message);
+      await execAsync('pkill -f scrcpy || true');
+      await new Promise((r) => setTimeout(r, 800));
+    } catch {
+      /* 忽略 */
     }
-  });
-  
-  ws.on('close', () => {
-    console.log('WebSocket 客户端断开');
-    client.destroy();
-  });
-  
-  ws.on('error', (error) => {
-    console.error('WebSocket 错误:', error);
-    client.destroy();
-  });
-});
+  }
 
-// 创建 HTTP 健康检查服务器
+  await refreshDeviceSize();
+
+  const baseArgs = [
+    '--video-bit-rate=8M',
+    '--max-size=1920',
+    '--max-fps=60',
+  ];
+  const extra = parseExtraArgs();
+  const args = [...baseArgs, ...extra];
+
+  try {
+    scrcpyProcess = spawn(SCRCPY_PATH, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env },
+    });
+
+    nativeScrcpyRunning = true;
+
+    scrcpyProcess.stdout?.on('data', (data) => {
+      const t = data.toString().trim();
+      if (t) console.log('[scrcpy]', t);
+    });
+
+    scrcpyProcess.stderr?.on('data', (data) => {
+      const t = data.toString();
+      if (t.trim()) console.error('[scrcpy]', t);
+    });
+
+    scrcpyProcess.on('error', (err) => {
+      console.error('[scrcpy-server] 无法启动 scrcpy:', err.message);
+      nativeScrcpyRunning = false;
+      scrcpyProcess = null;
+      scheduleRestartScrcpy();
+    });
+
+    scrcpyProcess.on('close', (code) => {
+      console.log(`[scrcpy-server] Scrcpy 进程已退出，代码: ${code}`);
+      nativeScrcpyRunning = false;
+      scrcpyProcess = null;
+      scheduleRestartScrcpy();
+    });
+
+    console.log('[scrcpy-server] 已启动 Scrcpy，请在系统弹出的窗口中查看流畅画面。');
+  } catch (e) {
+    console.error('[scrcpy-server] 启动失败:', e);
+    nativeScrcpyRunning = false;
+    scrcpyProcess = null;
+    scheduleRestartScrcpy();
+  }
+}
+
+function sendJson(res, status, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
 const httpServer = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    });
+    res.end();
+    return;
+  }
+
+  if (req.method !== 'GET' || (req.url !== '/' && req.url !== '' && !req.url?.startsWith('/?'))) {
+    sendJson(res, 404, { error: 'not_found' });
+    return;
+  }
+
+  sendJson(res, 200, {
     status: 'ok',
-    isRunning: isRunning,
+    mode: 'native_window',
+    /** 是否与 scrcpy 子进程仍保持运行（退出后约 5s 会重试拉起） */
+    nativeScrcpyRunning,
+    scrcpyPath: SCRCPY_PATH,
     device: {
       width: deviceWidth,
-      height: deviceHeight
+      height: deviceHeight,
+    },
+    hint: '流畅画面在本机 Scrcpy 系统窗口；网页内为 ADB 低帧预览。',
+  });
+});
+
+httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
+  console.log(`[scrcpy-server] 控制/探测: http://127.0.0.1:${HTTP_PORT}/ （CORS 已开，供页面探测）`);
+  void launchNativeScrcpy();
+});
+
+function shutdown() {
+  killRestartTimer();
+  console.log('[scrcpy-server] 正在退出…');
+  if (scrcpyProcess && !scrcpyProcess.killed) {
+    try {
+      scrcpyProcess.kill('SIGTERM');
+    } catch {
+      /* 忽略 */
     }
-  }));
-});
-
-httpServer.listen(HTTP_PORT, () => {
-  console.log(`Scrcpy WebSocket 服务器运行在 ws://localhost:${PORT}`);
-  console.log(`健康检查: http://localhost:${HTTP_PORT}`);
-  // 启动 Scrcpy 服务器
-  startScrcpyServer();
-});
-
-// 处理退出信号
-process.on('SIGINT', () => {
-  console.log('正在停止服务...');
-  if (scrcpyProcess) {
-    scrcpyProcess.kill();
   }
-  process.exit(0);
-});
+  httpServer.close(() => process.exit(0));
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

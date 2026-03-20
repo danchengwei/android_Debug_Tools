@@ -44,17 +44,161 @@ export class LocalAdbService {
    * 桥接地址与当前页面主机一致（例如页面是 http://192.168.x.x:3000 则请求 http://192.168.x.x:3003），
    * 避免从局域网 IP 打开页面时请求 127.0.0.1 被浏览器拦截（Failed to fetch / TypeError）。
    */
+  /** 与 vite.config 中开发端口、默认 preview 端口一致：这些端口上同源 /api 会由 Vite 代理到 adb-server */
+  private isViteManagedUiPort(port: string): boolean {
+    return port === '3000' || port === '4173';
+  }
+
+  /** 含 IPv6 回环（避免 [::1] 被误判成「非回环」去直连 :3003） */
+  private isLoopbackHost(hostname: string): boolean {
+    const h = (hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+    return h === '127.0.0.1' || h === 'localhost' || h === '::1';
+  }
+
   private getBridgeBaseUrl(): string {
     if (typeof window === 'undefined') return 'http://127.0.0.1:3003';
-    const hostname = window.location.hostname;
+    const { port, hostname } = window.location;
     const h = hostname && hostname.length > 0 ? hostname : '127.0.0.1';
+    /**
+     * 页面在 Vite 托管端口时：桥接一律走同源「/api」，由 vite 代理到 127.0.0.1:3003。
+     * 若用手机访问电脑局域网 IP，必须让 Vite 监听 0.0.0.0（勿用仅 127.0.0.1），否则页面根本打不开。
+     */
+    if (this.isViteManagedUiPort(port)) {
+      return '';
+    }
     return `http://${h}:3003`;
   }
 
+  /**
+   * 依次尝试的桥接基址。
+   * 开发/预览端口上：**优先「当前页面主机:3003」直连 adb-server**（与 listen 0.0.0.0 配合），再试同源 /api。
+   * 原因：部分环境下 Vite 内置代理或中间件未命中时，/api 会落静态层返回 HTML 404；直连 3003 与代理无关，最稳。
+   * 手机用电脑局域网 IP 打开时，主机已是电脑 IP，不会误用 127.0.0.1（127.0.0.1 仅作本机回环页的兜底）。
+   */
+  private getBridgeFetchBases(): string[] {
+    const m = this.getBridgeBaseUrl();
+    const host =
+      typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : '';
+    const onLoopback = this.isLoopbackHost(host);
+    const out: string[] = [];
+
+    if (m === '') {
+      if (host) {
+        out.push(`http://${host}:3003`);
+      }
+      out.push('');
+      if (onLoopback || !host) {
+        out.push('http://127.0.0.1:3003');
+      }
+    } else {
+      out.push(m);
+      if (host && !onLoopback && !m.includes(`${host}:3003`)) {
+        out.push(`http://${host}:3003`);
+      }
+      if (
+        onLoopback &&
+        !/^https?:\/\/127\.0\.0\.1:3003\/?$/i.test(m) &&
+        !/^https?:\/\/localhost:3003\/?$/i.test(m)
+      ) {
+        out.push('http://127.0.0.1:3003');
+      }
+    }
+    return [...new Set(out)];
+  }
+
+  /**
+   * 对桥接发 GET：404 / 502 / 503 / 504 时换下一基址重试（代理未命中、桥接短暂不可达时避免直接失败）。
+   */
+  private shouldRetryBridgeFetch(status: number): boolean {
+    return status === 404 || status === 502 || status === 503 || status === 504;
+  }
+
+  /**
+   * 请求本机桥接在本机电脑上打开 Chrome 的「远程调试 / inspect」页（chrome:// 无法由网页直接打开）。
+   */
+  async openDesktopChromeInspect(): Promise<boolean> {
+    const path = '/api/open-desktop-inspect';
+    for (const base of this.getBridgeFetchBases()) {
+      const url = base === '' ? path : `${base.replace(/\/$/, '')}${path}`;
+      try {
+        const r = await fetch(url, { method: 'POST', cache: 'no-store' });
+        if (r.ok) {
+          const j = (await r.json().catch(() => ({}))) as { ok?: boolean };
+          return j.ok !== false;
+        }
+      } catch {
+        /* 换下一基址 */
+      }
+    }
+    return false;
+  }
+
+  /** 当前已绑定设备序列号（未连接时为 null） */
+  getCurrentSerial(): string | null {
+    return this.deviceSerial;
+  }
+
+  private async bridgePostJson(path: string, body: Record<string, unknown>): Promise<Response> {
+    const p = path.startsWith('/') ? path : `/${path}`;
+    let last: Response | undefined;
+    for (const base of this.getBridgeFetchBases()) {
+      const url = base === '' ? p : `${base.replace(/\/$/, '')}${p}`;
+      try {
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: JSON.stringify(body),
+          cache: 'no-store',
+        });
+        last = r;
+        if (!this.shouldRetryBridgeFetch(r.status)) return r;
+      } catch {
+        /* 换下一基址 */
+      }
+    }
+    return last ?? new Response('', { status: 503, statusText: 'Bridge unreachable' });
+  }
+
+  private async bridgePostBinary(pathWithQuery: string, buffer: ArrayBuffer, contentType: string): Promise<Response> {
+    const p = pathWithQuery.startsWith('/') ? pathWithQuery : `/${pathWithQuery}`;
+    let last: Response | undefined;
+    for (const base of this.getBridgeFetchBases()) {
+      const url = base === '' ? p : `${base.replace(/\/$/, '')}${p}`;
+      try {
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': contentType || 'application/octet-stream' },
+          body: buffer,
+          cache: 'no-store',
+        });
+        last = r;
+        if (!this.shouldRetryBridgeFetch(r.status)) return r;
+      } catch {
+        /* 换下一基址 */
+      }
+    }
+    return last ?? new Response('', { status: 503, statusText: 'Bridge unreachable' });
+  }
+
+  private async bridgeGet(pathWithQuery: string): Promise<Response> {
+    const path = pathWithQuery.startsWith('/') ? pathWithQuery : `/${pathWithQuery}`;
+    let last: Response | undefined;
+    for (const base of this.getBridgeFetchBases()) {
+      const url = base === '' ? path : `${base.replace(/\/$/, '')}${path}`;
+      try {
+        const r = await fetch(url, { cache: 'no-store' });
+        last = r;
+        if (!this.shouldRetryBridgeFetch(r.status)) return r;
+      } catch {
+        /* 换下一基址 */
+      }
+    }
+    return last ?? new Response('', { status: 503, statusText: 'Bridge unreachable' });
+  }
+
   private bridgeOfflineError(): Error {
-    const base = this.getBridgeBaseUrl();
     return new Error(
-      `无法连接 ADB 桥接（${base}）。请在本机项目目录执行：npm start（或 npm run dev / npm run dev:bridge），看到「ADB server running」后保持窗口不关，再点「连接设备」或「重试连接」。`
+      '无法连接本机调试服务。请先在电脑上双击「启动调试工具」完成启动，并保持该窗口不关，再点「连接设备」或「重试连接」。'
     );
   }
 
@@ -79,12 +223,11 @@ export class LocalAdbService {
   /** 连接前确认桥接进程已启动（优先 /api/health；旧版桥接无该接口时改用 adb version） */
   private async ensureBridge(): Promise<void> {
     try {
-      const r = await fetch(`${this.getBridgeBaseUrl()}/api/health`, { cache: 'no-store' });
+      const r = await this.bridgeGet('/api/health');
       if (r.ok) return;
       if (r.status === 404) {
-        const r2 = await fetch(
-          `${this.getBridgeBaseUrl()}/api/adb?command=${encodeURIComponent('adb version')}`,
-          { cache: 'no-store' }
+        const r2 = await this.bridgeGet(
+          `/api/adb?command=${encodeURIComponent('adb version')}`
         );
         if (r2.ok) return;
         const t2 = await r2.text().catch(() => '');
@@ -98,6 +241,16 @@ export class LocalAdbService {
       }
       throw e;
     }
+  }
+
+  /**
+   * 多机时 adb devices 顺序不稳定；Chrome Inspect 会列出所有设备让你选，我们若永远取第一行可能是 emulator，
+   * 真机在跑 H5 时就会出现「Inspect 有、本工具没有」。
+   */
+  private pickPreferredDeviceSerial(authorized: string[]): string {
+    if (authorized.length <= 1) return authorized[0];
+    const nonEmu = authorized.filter((s) => !/^emulator-\d+$/i.test(s.trim()));
+    return nonEmu.length > 0 ? nonEmu[0] : authorized[0];
   }
 
   async connect(): Promise<DeviceInfo> {
@@ -133,7 +286,7 @@ export class LocalAdbService {
         );
       }
 
-      const serial = authorized[0];
+      const serial = this.pickPreferredDeviceSerial(authorized);
       this.deviceSerial = serial;
       this.connected = true;
 
@@ -159,7 +312,7 @@ export class LocalAdbService {
 
       const multiDeviceHint =
         authorized.length > 1
-          ? `本机共 ${authorized.length} 台可用，当前使用该序列号：${serial}（其余请断开或后续支持多机切换）`
+          ? `本机共 ${authorized.length} 台 device；已自动优先非模拟器序列号：${serial}（若 H5 仍空，请关掉 emulator-* 或只插一台真机后再连）`
           : undefined;
 
       return {
@@ -183,6 +336,17 @@ export class LocalAdbService {
   async disconnect(): Promise<void> {
     this.connected = false;
     this.deviceSerial = null;
+  }
+
+  /**
+   * 用界面当前「已连接设备」的序列号写回单例。
+   * Vite 热更新会重建本类实例，内部 deviceSerial 会丢，但 React 仍显示已连接，此时 H5 桥接会误报「未选中设备」。
+   */
+  rebindDeviceSerial(serial: string | undefined | null): void {
+    const s = (serial || '').trim();
+    if (!s || !/^[\w.:+-]+$/.test(s)) return;
+    this.deviceSerial = s;
+    this.connected = true;
   }
 
   async sendKeyEvent(keyCode: number): Promise<void> {
@@ -328,6 +492,8 @@ export class LocalAdbService {
     if (!s) return null;
     s = s.replace(/^[`'"'<]+/g, '').replace(/[`'"'),\];}>]+$/g, '').trim();
     s = s.replace(/\\u003d/gi, '=').replace(/\\u0026/gi, '&').replace(/\\\//g, '/');
+    // 协议相对链接 //example.com/path → https:
+    if (/^\/\//.test(s)) s = `https:${s}`;
     if (!/^https?:\/\//i.test(s) && !/^file:\/\//i.test(s)) return null;
     try {
       return new URL(s).href;
@@ -356,8 +522,17 @@ export class LocalAdbService {
     const reQuoted = /["'](https?:\/\/[^"'\\]{4,})["']/gi;
     while ((m = reQuoted.exec(text)) !== null) push(m[1]);
 
+    // JSON / 配置里常见的 "url":"https://..."
+    const reJsonUrl = /["']url["']\s*:\s*["'](https?:\/\/[^"'\\]{4,})["']/gi;
+    while ((m = reJsonUrl.exec(text)) !== null) push(m[1]);
+
+    // 协议相对（在 normalize 里补全 https:）
+    const reProtoRel =
+      /\b(https?:)?\/\/[a-zA-Z0-9][-a-zA-Z0-9.+_]{0,63}\.[a-zA-Z][-a-zA-Z0-9.+_:/%?#&=@]{3,}/gi;
+    while ((m = reProtoRel.exec(text)) !== null) push(m[0]);
+
     const reKv =
-      /\b(?:mUrl|mOriginalUrl|HistoryUrl|baseUrl|loadedUrl|originalUrl|url|Url)\s*[=:]\s*"?([^"\s]+)"?/gi;
+      /\b(?:mUrl|mOriginalUrl|HistoryUrl|baseUrl|loadedUrl|originalUrl|lastCommittedUrl|committedUrl|visibleUrl|navigationUrl|url|Url)\s*[=:]\s*"?([^"\s]+)"?/gi;
     while ((m = reKv.exec(text)) !== null) {
       const v = m[1];
       if (/^https?:\/\//i.test(v) || /^file:\/\//i.test(v)) push(v);
@@ -370,7 +545,8 @@ export class LocalAdbService {
    * 优先从含 mUrl / HistoryUrl 等关键字的行取 URL，否则取长匹配（常为完整 H5 地址）。
    */
   private pickPrimaryWebUrl(topDump: string, combined: string, candidates: string[]): string | null {
-    const key = /mUrl|mOriginalUrl|HistoryUrl|XWalkUri|loadedUrl|SW[-_]?URL|currentUrl|originalUrl/i;
+    const key =
+      /mUrl|mOriginalUrl|HistoryUrl|XWalkUri|loadedUrl|loadUrl|SW[-_]?URL|currentUrl|originalUrl|lastCommittedUrl|committedUrl|visibleUrl|navigationUrl|Crosswalk|XWalk/i;
     const scan = (blob: string): string | null => {
       for (const line of blob.split(/\r?\n/)) {
         if (!key.test(line)) continue;
@@ -432,9 +608,88 @@ export class LocalAdbService {
   }
 
   /**
+   * 通过桥接 /api/webview-pages 读取 DevTools /json。
+   * 不传 package 或包名为 System 时由服务端按 dumpsys 前台包名 + 全机套接字扫描兜底。
+   */
+  private async fetchWebViewDevtoolsPages(packageName: string): Promise<{
+    pages: { url: string; title: string | null }[];
+  }> {
+    const serial = this.deviceSerial;
+    if (!serial) {
+      return { pages: [] };
+    }
+    const pkg = (packageName || '').trim();
+    const params = new URLSearchParams({ serial });
+    const sendPkg =
+      pkg.length > 0 &&
+      pkg !== 'System' &&
+      pkg !== 'com.android.launcher' &&
+      /^[a-zA-Z0-9_.]+$/.test(pkg);
+    if (sendPkg) params.set('package', pkg);
+    try {
+      const r = await this.bridgeGet(`/api/webview-pages?${params.toString()}`);
+      const textRaw = await r.text();
+      type PageRow = { url: string; title?: string | null };
+      let pages: PageRow[] = [];
+      try {
+        const parsed: unknown = JSON.parse(textRaw);
+        if (Array.isArray(parsed)) {
+          pages = parsed as PageRow[];
+        } else if (
+          parsed &&
+          typeof parsed === 'object' &&
+          Array.isArray((parsed as { pages?: PageRow[] }).pages)
+        ) {
+          pages = (parsed as { pages: PageRow[] }).pages;
+        }
+      } catch {
+        return { pages: [] };
+      }
+      const filtered = pages
+        .filter((p) => p && typeof p.url === 'string' && p.url.length > 0)
+        .map((p) => ({ url: p.url.trim(), title: p.title ?? null }));
+      if (filtered.length > 0) {
+        return { pages: filtered };
+      }
+      if (!r.ok) {
+        return { pages: [] };
+      }
+      return { pages: [] };
+    } catch {
+      return { pages: [] };
+    }
+  }
+
+  /**
    * WebView / H5 地址：合并 activity top、activities、window 及当前包相关片段，解析完整 URL 与候选列表。
    */
   async getH5Info(packageName?: string): Promise<H5Info | null> {
+    const safePkg = (packageName || '').trim();
+    let devtoolsPages: { url: string; title: string | null }[] = [];
+    try {
+      devtoolsPages = (await this.fetchWebViewDevtoolsPages(safePkg)).pages;
+    } catch {
+      devtoolsPages = [];
+    }
+
+    const buildFromDevtoolsOnly = (): H5Info => {
+      const dtUrls = devtoolsPages.map((p) => p.url).filter((u) => u && u.length > 2);
+      const primary =
+        dtUrls.find((u) => /^https?:\/\//i.test(u) && !/^about:/i.test(u)) ||
+        dtUrls.find((u) => /^https?:\/\//i.test(u)) ||
+        dtUrls.find((u) => /^file:\/\//i.test(u)) ||
+        dtUrls[0] ||
+        null;
+      const dtTitle = devtoolsPages.find((p) => p.title && p.title.trim())?.title?.trim() ?? null;
+      return {
+        currentUrl: primary,
+        pageTitle: dtTitle,
+        userAgent: '',
+        urlCandidates: dtUrls.length > 0 ? dtUrls : undefined,
+        webViewUserAgent: null,
+      };
+    };
+
     try {
       const chunks: string[] = [];
       let top = '';
@@ -454,37 +709,77 @@ export class LocalAdbService {
         }
       };
 
-      await tryAppend('adb shell dumpsys activity activities | head -n 800');
-      await tryAppend('adb shell dumpsys window windows | head -n 280');
+      await tryAppend('adb shell dumpsys activity activities | head -n 3000');
+      await tryAppend('adb shell dumpsys window windows | head -n 400');
 
-      const safePkg = (packageName || '').trim();
+      /** 在设备 shell 内管道过滤（不依赖本机 grep/head，Windows 桥接也可用） */
+      await tryAppend(
+        'adb shell "dumpsys activity top 2>/dev/null | grep -iE \'https?://|file://|mUrl|mOriginalUrl|HistoryUrl|lastCommitted|loadedUrl|url=\' | head -n 220"'
+      );
+      await tryAppend(
+        'adb shell "dumpsys activity activities 2>/dev/null | grep -iE \'https?://|file://|mUrl|HistoryUrl|loadedUrl|lastCommitted|navigationUrl|loadUrl|originalUrl\' | head -n 480"'
+      );
+      await tryAppend('adb shell "dumpsys webview 2>/dev/null | head -n 500"');
+
       if (/^[a-zA-Z0-9_.]+$/.test(safePkg)) {
         await tryAppend(
           `adb shell dumpsys activity activities 2>/dev/null | grep -F "${safePkg}" | head -n 160`
         );
+        await tryAppend(
+          `adb shell "dumpsys activity top 2>/dev/null | grep -F ${safePkg} | head -n 120"`
+        );
       }
 
       const combined = chunks.join('\n\n');
-      const candidates = this.extractHttpLikeUrls(combined);
-      const primary = this.pickPrimaryWebUrl(top, combined, candidates);
+      const dumpCandidates = this.extractHttpLikeUrls(combined);
+
+      const dtUrls = devtoolsPages.map((p) => p.url).filter((u) => u && u.length > 2);
+      const mergedSet = new Set<string>([...dtUrls, ...dumpCandidates]);
+      const mergedCandidates = Array.from(mergedSet);
+
+      const dtPrimary =
+        dtUrls.find((u) => /^https?:\/\//i.test(u) && !/^about:/i.test(u)) ||
+        dtUrls.find((u) => /^https?:\/\//i.test(u)) ||
+        dtUrls.find((u) => /^file:\/\//i.test(u)) ||
+        dtUrls[0] ||
+        null;
+      const dumpPrimary = this.pickPrimaryWebUrl(top, combined, dumpCandidates);
+      const primary = dtPrimary ?? dumpPrimary;
 
       const ordered =
         primary != null
-          ? [primary, ...candidates.filter((u) => u !== primary)]
-          : [...candidates].sort((a, b) => b.length - a.length);
+          ? [primary, ...mergedCandidates.filter((u) => u !== primary)]
+          : [...mergedCandidates].sort((a, b) => b.length - a.length);
 
-      const pageTitle = this.extractPageTitleFromDump(combined);
+      const dtTitle = devtoolsPages.find((p) => p.title && p.title.trim())?.title?.trim() ?? null;
+      const pageTitle = dtTitle ?? this.extractPageTitleFromDump(combined);
       const webViewUa = this.extractWebViewUserAgent(combined);
-      const userAgent = webViewUa || (await this.getFallbackLinuxUa());
+      let userAgent = webViewUa || '';
+      try {
+        if (!userAgent) userAgent = await this.getFallbackLinuxUa();
+      } catch {
+        if (!userAgent) userAgent = '';
+      }
+
+      const finalUrl = primary ?? ordered[0] ?? null;
 
       return {
-        currentUrl: primary ?? ordered[0] ?? null,
+        currentUrl: finalUrl,
         pageTitle: pageTitle ?? null,
         userAgent,
         urlCandidates: ordered.length > 0 ? ordered : undefined,
         webViewUserAgent: webViewUa,
       };
     } catch {
+      const fallback = buildFromDevtoolsOnly();
+      if (fallback.currentUrl || (fallback.urlCandidates && fallback.urlCandidates.length > 0)) {
+        try {
+          fallback.userAgent = await this.getFallbackLinuxUa();
+        } catch {
+          /* 忽略 */
+        }
+        return fallback;
+      }
       return { currentUrl: null, pageTitle: null, userAgent: '' };
     }
   }
@@ -599,6 +894,187 @@ export class LocalAdbService {
     }
   }
 
+  private requireSerialOrThrow(): string {
+    const s = this.deviceSerial;
+    if (!s) {
+      throw new Error('未连接设备');
+    }
+    return s;
+  }
+
+  /**
+   * 上传 APK 并 adb install -r（经桥接流式转发，大包请稍候）。
+   */
+  async installApkFromFile(file: File): Promise<{ ok: boolean; output: string }> {
+    const serial = this.requireSerialOrThrow();
+    const buf = await file.arrayBuffer();
+    const q = `/api/install-apk?serial=${encodeURIComponent(serial)}`;
+    const r = await this.bridgePostBinary(q, buf, 'application/vnd.android.package-archive');
+    const j = (await r.json().catch(() => ({}))) as { ok?: boolean; output?: string; message?: string };
+    const output = (j.output || j.message || '').trim() || `HTTP ${r.status}`;
+    if (!r.ok && r.status >= 400) {
+      throw new Error(output);
+    }
+    return { ok: j.ok !== false && r.ok, output };
+  }
+
+  /**
+   * 从桥接进程工作目录（一般为项目根）安装相对路径 APK，例如 app/build/outputs/apk/debug/app-debug.apk
+   */
+  async installApkFromProjectRelativePath(relativePath: string): Promise<{ ok: boolean; output: string }> {
+    const serial = this.requireSerialOrThrow();
+    const r = await this.bridgePostJson('/api/install-apk-from-path', {
+      serial,
+      relativePath: relativePath.trim(),
+    });
+    const j = (await r.json().catch(() => ({}))) as { ok?: boolean; output?: string; message?: string };
+    const output = (j.output || j.message || '').trim() || `HTTP ${r.status}`;
+    if (!r.ok) {
+      throw new Error(output);
+    }
+    return { ok: !!j.ok, output };
+  }
+
+  /** 仅清缓存（pm clear 的轻量替代，需系统支持 cmd package clear-cache） */
+  async clearAppCacheOnly(packageName: string): Promise<string> {
+    const serial = this.requireSerialOrThrow();
+    const r = await this.bridgePostJson('/api/clear-app-cache', { serial, package: packageName });
+    const j = (await r.json().catch(() => ({}))) as { ok?: boolean; output?: string; message?: string };
+    const out = (j.output || j.message || '').trim();
+    if (!j.ok) {
+      throw new Error(out || '清缓存失败（部分系统不支持或包不存在）');
+    }
+    return out || 'OK';
+  }
+
+  /** ANR 目录、tombstone 抽样、crash buffer、dropbox 尾部等 */
+  async fetchDebugArtifacts(): Promise<Record<string, string>> {
+    const serial = this.requireSerialOrThrow();
+    const r = await this.bridgePostJson('/api/debug-artifacts', { serial });
+    const j = (await r.json().catch(() => ({}))) as { ok?: boolean; parts?: Record<string, string>; message?: string };
+    if (!j.ok || !j.parts) {
+      throw new Error(j.message || '拉取诊断信息失败');
+    }
+    return j.parts;
+  }
+
+  async fetchGlobalHttpProxy(): Promise<string> {
+    const serial = this.requireSerialOrThrow();
+    const resp = await this.bridgeGet(`/api/http-proxy?serial=${encodeURIComponent(serial)}`);
+    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; proxy?: string; message?: string };
+    if (!resp.ok || !j.ok) {
+      throw new Error(j.message || '读取系统代理失败');
+    }
+    return (j.proxy ?? '').trim();
+  }
+
+  /** host:port 或 null/空字符串清除代理 */
+  async setGlobalHttpProxy(hostPort: string | null | undefined): Promise<string> {
+    const serial = this.requireSerialOrThrow();
+    const proxy =
+      hostPort == null || String(hostPort).trim() === '' ? '' : String(hostPort).trim();
+    const r = await this.bridgePostJson('/api/http-proxy', { serial, proxy });
+    const j = (await r.json().catch(() => ({}))) as { ok?: boolean; message?: string };
+    if (!j.ok) {
+      throw new Error(j.message || '设置代理失败');
+    }
+    return j.message || 'OK';
+  }
+
+  async fetchPackagePermissionsSummary(packageName: string): Promise<{ summary: string; truncated: boolean }> {
+    const serial = this.requireSerialOrThrow();
+    const resp = await this.bridgeGet(
+      `/api/package-permissions?serial=${encodeURIComponent(serial)}&package=${encodeURIComponent(packageName)}`
+    );
+    const j = (await resp.json().catch(() => ({}))) as {
+      ok?: boolean;
+      summary?: string;
+      truncated?: boolean;
+      message?: string;
+    };
+    if (!resp.ok || !j.ok) {
+      throw new Error(j.message || '获取权限摘要失败');
+    }
+    return { summary: j.summary ?? '', truncated: !!j.truncated };
+  }
+
+  async listRunAsSubdir(packageName: string, kind: 'databases' | 'shared_prefs'): Promise<string> {
+    const serial = this.requireSerialOrThrow();
+    const resp = await this.bridgeGet(
+      `/api/run-as-list?serial=${encodeURIComponent(serial)}&package=${encodeURIComponent(packageName)}&kind=${encodeURIComponent(kind)}`
+    );
+    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; output?: string; message?: string };
+    if (!resp.ok || !j.ok) {
+      throw new Error(j.output || j.message || 'run-as 列出失败（需 debuggable）');
+    }
+    return j.output ?? '';
+  }
+
+  async downloadRunAsFile(packageName: string, relPath: string): Promise<Blob> {
+    const serial = this.requireSerialOrThrow();
+    const resp = await this.bridgeGet(
+      `/api/run-as-file?serial=${encodeURIComponent(serial)}&package=${encodeURIComponent(packageName)}&relPath=${encodeURIComponent(relPath)}`
+    );
+    if (!resp.ok) {
+      const t = await resp.text();
+      let msg = t;
+      try {
+        const j = JSON.parse(t) as { message?: string };
+        if (j?.message) msg = j.message;
+      } catch {
+        /* 非 JSON */
+      }
+      throw new Error(msg || `HTTP ${resp.status}`);
+    }
+    return resp.blob();
+  }
+
+  async runMonkey(packageName: string, events: number, throttleMs: number): Promise<string> {
+    const serial = this.requireSerialOrThrow();
+    const r = await this.bridgePostJson('/api/monkey', {
+      serial,
+      package: packageName,
+      events,
+      throttle: throttleMs,
+    });
+    const j = (await r.json().catch(() => ({}))) as { ok?: boolean; output?: string; message?: string };
+    const out = (j.output || j.message || '').trim();
+    if (!r.ok && r.status >= 500) {
+      throw new Error(out || `HTTP ${r.status}`);
+    }
+    return out || (j.ok ? 'Monkey 结束' : 'Monkey 异常结束');
+  }
+
+  async fetchWebViewSummary(packageName?: string): Promise<{
+    ok: boolean;
+    socketCount: number;
+    pageCount: number;
+    hint: string;
+  }> {
+    const serial = this.requireSerialOrThrow();
+    const pkgQ =
+      packageName && packageName.length > 2
+        ? `&package=${encodeURIComponent(packageName)}`
+        : '';
+    const resp = await this.bridgeGet(`/api/webview-summary?serial=${encodeURIComponent(serial)}${pkgQ}`);
+    const j = (await resp.json().catch(() => ({}))) as {
+      ok?: boolean;
+      socketCount?: number;
+      pageCount?: number;
+      hint?: string;
+      message?: string;
+    };
+    if (!resp.ok) {
+      throw new Error(j.message || '获取 WebView 摘要失败');
+    }
+    return {
+      ok: j.ok !== false,
+      socketCount: j.socketCount ?? 0,
+      pageCount: j.pageCount ?? 0,
+      hint: j.hint ?? '',
+    };
+  }
+
   async pushFile(file: File, devicePath: string): Promise<void> {
     try {
       const form = new FormData();
@@ -654,12 +1130,7 @@ export class LocalAdbService {
       const serialQ = this.deviceSerial
         ? `&serial=${encodeURIComponent(this.deviceSerial)}`
         : '';
-      const response = await fetch(
-        `${this.getBridgeBaseUrl()}/api/screen?t=${Date.now()}${serialQ}`,
-        {
-        cache: 'no-store',
-        }
-      );
+      const response = await this.bridgeGet(`/api/screen?t=${Date.now()}${serialQ}`);
       if (!response.ok) {
         const errText = await response.text().catch(() => '');
         throw new Error(errText || `截图失败 HTTP ${response.status}`);
@@ -683,9 +1154,7 @@ export class LocalAdbService {
     console.log('执行命令:', effective);
     let response: Response;
     try {
-      response = await fetch(`${this.getBridgeBaseUrl()}/api/adb?command=${encodeURIComponent(effective)}`, {
-        cache: 'no-store',
-      });
+      response = await this.bridgeGet(`/api/adb?command=${encodeURIComponent(effective)}`);
     } catch (e) {
       console.error('请求失败:', e);
       if (this.isBridgeUnreachable(e)) {

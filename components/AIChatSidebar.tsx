@@ -67,7 +67,9 @@ function buildSystemContext(ctx: AIChatSidebarContext): string {
       `【H5 / WebView】\n主 URL: ${h5.currentUrl ?? '无'}\n标题: ${h5.pageTitle ?? '无'}\nUA: ${h5.userAgent || '无'}${wvUa}${cand}`
     );
   } else {
-    sections.push('【H5 / WebView】未获取（请点击信息区刷新）');
+    sections.push(
+      '【H5 / WebView】主界面已不再展示 H5 解析；若顶层 Activity 为 OtherProcessBrowserActivity，请在「顶层 Activity」旁点击「打开 Chrome Inspect」调试 WebView。'
+    );
   }
 
   if (ctx.layout) {

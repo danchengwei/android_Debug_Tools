@@ -1,5 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { localAdbService as adbService } from '../services/localAdbService';
+import type { DeviceInfo, AppStackInfo, AppEnvInfo } from '../types';
+import { DebugExtrasPanel } from './DebugExtrasPanel';
 import { Grid3x3, Fingerprint, Trash2, RotateCcw, Monitor, FileCode, CheckCircle2, Circle, Database, Network, Loader2, Camera, Upload, Download, FolderInput } from 'lucide-react';
 
 const DEFAULT_PUSH_PULL_DIR = '/sdcard/Download';
@@ -9,9 +11,20 @@ interface DevToolsProps {
   connected: boolean;
   /** 截屏并返回 blob URL，用于保存到本地 */
   onCaptureScreen?: () => Promise<string | null>;
+  /** 扩展调试区：Issue 模板等 */
+  device?: DeviceInfo | null;
+  stackInfo?: AppStackInfo | null;
+  envInfo?: AppEnvInfo | null;
 }
 
-export const DevTools: React.FC<DevToolsProps> = ({ packageName, connected, onCaptureScreen }) => {
+export const DevTools: React.FC<DevToolsProps> = ({
+  packageName,
+  connected,
+  onCaptureScreen,
+  device = null,
+  stackInfo = null,
+  envInfo = null,
+}) => {
   const [layoutBounds, setLayoutBounds] = useState(false);
   const [showTaps, setShowTaps] = useState(false);
   const [processing, setProcessing] = useState<string | null>(null);
@@ -327,10 +340,19 @@ export const DevTools: React.FC<DevToolsProps> = ({ packageName, connected, onCa
         </h4>
         <ul className="text-[10px] text-slate-400 space-y-1 list-disc list-inside">
           <li>系统代理：在电脑端配置 Charles / Proxyman，手机 WiFi 代理指向电脑，可抓 HTTP(S)。</li>
+          <li>也可使用下方「全局 HTTP 代理」在设备上写入 <code className="bg-slate-800 px-0.5 rounded">settings global http_proxy</code>（与 Wi‑Fi 代理二选一时注意冲突）。</li>
           <li>WebView 调试：Chrome 访问 <code className="bg-slate-800 px-0.5 rounded">chrome://inspect</code>，对 WebView 进行审查与网络面板查看。</li>
           <li>HTTPS 需在设备上安装并信任抓包工具根证书。</li>
         </ul>
       </div>
+
+      <DebugExtrasPanel
+        connected={connected}
+        packageName={packageName}
+        device={device}
+        stackInfo={stackInfo}
+        envInfo={envInfo}
+      />
     </div>
   );
 };

@@ -1,114 +1,162 @@
 # 安卓调试工具（本地 ADB + Web）
 
-浏览器内连接真机调试：投屏、顶层 Activity、环境信息、布局、日志、Trace、反编译、AI 对话等。当前默认通过 **本机 ADB HTTP 桥接**（`localhost:3003`）执行命令，与前端（`localhost:3000`）分离。
+在浏览器内连接真机调试：**屏幕镜像（Scrcpy 视频流优先）**、**顶层 Activity**、**环境信息**、**WebView / H5 完整地址**、布局、日志、Trace、反编译、Scheme 跳转、AI 对话等。
+
+- 前端默认 **http://127.0.0.1:3000**
+- 命令与截图经本机 **ADB HTTP 桥接** **http://127.0.0.1:3003**（与页面同主机时可自动用局域网 IP，避免跨主机请求失败）
+- **一键启动**：`npm start` → `scripts/start-all.mjs` 释端口后并行 **桥接 + scrcpy-server + Vite**
+
+---
 
 ## 环境要求
 
-- **Node.js** 18+（建议 LTS）
-- **本机已安装 ADB**，且 `adb devices` 能看到设备（已开 USB 调试）
-- **本机已安装 [scrcpy](https://github.com/Genymobile/scrcpy)**（**默认 `npm start` 会起视频流服务**，无 scrcpy 时请看下方 `dev:lite`）
-- **Chrome / Edge**（推荐；镜像视频流依赖 **WebCodecs**）
-- 使用 **Gemini AI** 时：在项目根目录配置 `.env.local`，设置 `GEMINI_API_KEY`
+| 项 | 说明 |
+|----|------|
+| **Node.js** | 18+（建议 LTS） |
+| **ADB** | 本机已安装，`adb devices` 中设备状态须为 **`device`**（`offline` / `unauthorized` 时无法调试） |
+| **scrcpy** | 建议安装（[Genymobile/scrcpy](https://github.com/Genymobile/scrcpy)）。**`npm start` 默认会起 `scrcpy-server.js`**；若不需要视频流可用 **`npm run dev:lite`** |
+| **浏览器** | 推荐 **Chrome / Edge**；镜像 **H.264 解码**依赖 **WebCodecs** |
+| **Gemini AI** | 可选：项目根目录 `.env.local` 中配置 `GEMINI_API_KEY` |
 
-> 桥接服务启动时会打印实际使用的 **ADB 路径**。也可设置环境变量 **`ADB_PATH`** 指向你的 `adb`（例如 Android SDK `platform-tools/adb`）。  
-> **scrcpy** 路径可通过 **`SCRCPY_PATH`** 指定；未设置时会尝试 Homebrew 等常见路径，否则使用 PATH 中的 `scrcpy`。
+**环境变量（可选）**
+
+- **`ADB_PATH`**：显式指定 `adb` 可执行文件路径（如 Android SDK `platform-tools/adb`）。桥接启动日志会打印实际使用的路径。
+- **`SCRCPY_PATH`**：显式指定 `scrcpy`。未设置时依次尝试 Homebrew、`/usr/local` 等，否则使用 PATH 中的 `scrcpy`。
+
+---
 
 ## 启动服务
 
-### 推荐：一键启动（释放端口 + 所需服务）
+### 一键启动（推荐）
 
 ```bash
 npm install
 npm start
 ```
 
-与 **`npm run dev` 等价**。会先执行 **`scripts/start-all.mjs`**：
+与 **`npm run dev` 完全等价**。执行流程：
 
-1. **释放端口** **3000 / 3003 / 13377 / 13378**（及 macOS/Linux 下尽力结束旧的 `adb-server` / `scrcpy-server` 进程），避免「端口被占用」导致起不来。  
-2. **并行**拉起下列服务：
+1. 运行 **`scripts/start-all.mjs`**  
+   - 尝试释放端口：**3000**（Vite）、**3003**（桥接）、**13377**（Scrcpy WebSocket）、**13378**（Scrcpy HTTP 健康检查）  
+   - **macOS / Linux**：尽力 `pkill` 旧的 `adb-server.js` / `scrcpy-server.js`  
+   - **Windows**：通过 `netstat` + `taskkill` 尽力释端口（若仍有占用可手动结束进程）
+2. 并行启动：  
+   - **bridge**：`node adb-server.js`  
+   - **scrcpy**：`node scrcpy-server.js`（转发 H.264 至 `ws://主机:13377`）  
+   - **vite**：`vite --host 127.0.0.1`
 
-- **bridge**：`adb-server.js`（端口 **3003**，`adb`、ADB 截图兜底等）
-- **scrcpy**：`scrcpy-server.js`（端口 **13377**，**H.264 视频流**；健康检查 **13378**）
-- **vite**：前端（端口 **3000**）
+浏览器打开：**http://127.0.0.1:3000/**。终端中日志带 **`[bridge]`**、**`[vite]`**、**`[scrcpy]`** 前缀。
 
-终端里应能看到 `[bridge]`、`[vite]`、`[scrcpy]` 前缀日志。浏览器访问：**http://127.0.0.1:3000/**  
+> **说明**：`concurrently` **未**使用 `-k`，任一侧进程异常退出时，其余服务可能仍在运行；修复后重新 **`npm start`** 即可。
 
-按 **Ctrl+C** 一般会结束上述进程（视终端与 concurrently 行为而定）。**未使用 `-k`**：若 scrcpy 进程异常退出，桥接与前端仍可继续，便于先看其它功能；修复 scrcpy 后重新 **`npm start`** 即可。
-
-> **镜像说明**：**默认以 Scrcpy 视频流为主**；仅当 **13377 不可用 / 解码失败** 时，才用 **ADB 连续截图**兜底（卡、延迟高属正常）。
-
-| 脚本 | 说明 |
-|------|------|
-| **`npm start`** / **`npm run dev`** | **一键**：释端口 + **桥接 3003 + scrcpy-server + Vite 3000**（默认） |
-| **`npm run dev:run`** | **不**先释端口，直接起三服务（已由其它脚本占用端口排查时用） |
-| **`npm run dev:lite`** | 一键释端口 + 仅桥接 + Vite（**不**起 scrcpy） |
-| **`npm run dev:lite:run`** | 仅桥接 + Vite，不释端口 |
-| `npm run dev:raw` | **仅**前端，不启桥接（你已单独起 `dev:bridge` 时用） |
-| `npm run dev:bridge` | **仅** HTTP 桥接 |
-| `npm run dev:local` | Bash 脚本：含 pkill / 端口清理（与 Node 一键逻辑类似，可选） |
-
-桥接正常时会出现：`ADB server running on http://127.0.0.1:3003`。scrcpy 侧会打印 `[scrcpy-server] 使用 scrcpy: ...`。
-
-前端连接前会请求 **`GET /api/health`**。若你长期未重启，重新执行 **`npm start`** 即可。
-
-### 重启
-
-在运行 **`npm start`** 的终端 **Ctrl+C** 后，再执行 **`npm start`**。
-
-## 屏幕镜像（实时画面）
-
-| 模式 | 条件 | 说明 |
-|------|------|------|
-| **Scrcpy 流** | `ws://localhost:13377` 可用且浏览器支持 **WebCodecs** | H.264 解码后绘制到 Canvas，帧率更高、更流畅。**`npm start`** 会起 `scrcpy-server.js`；亦可按需使用 `npm run dev:local`。 |
-| **ADB 连续截图** | 至少 **3003** 桥接正常（`/api/screen`） | 与 Scrcpy **并行**：串行 `exec-out screencap` PNG，约 **5～9 帧/秒**，**延迟明显高于视频流**，属正常现象。Scrcpy 就绪后自动切 Canvas。 |
-
-**最低要求（能看见画面）**：**3003** 桥接可用。使用 **`npm start`** 时会自动启动；若只用 `dev:raw`，需另起 `dev:bridge` 或 `node adb-server.js`。
-
-**觉得卡、延迟高**：说明当前多为 **ADB 截图兜底**（13377 未连上或解码失败）。请确认 **`npm start`** 已起 **`scrcpy-server`**，顶栏应出现 **「Scrcpy · x FPS」**；可看 `[scrcpy]` 终端日志是否报错。
-
-顶栏会显示当前模式：**「Scrcpy · x FPS」** 或 **「ADB 截图（约 5～9 帧/秒）」**。点击工具栏 **刷新** 可重置连接并重试 Scrcpy。
-
-### 其他脚本
+### npm 脚本一览
 
 | 命令 | 说明 |
 |------|------|
-| `npm run dev:suppress-adb` | 启动 Vite 前会反复 `adb kill-server`，用于需要 **WebUSB 独占设备** 的旧流程（macOS/Linux） |
-| `npm run build` | 生产构建 |
-| `npm run preview` | 预览构建结果 |
-| `npm run lint` | TypeScript 检查 |
+| **`npm start`** / **`npm run dev`** | 释端口 + 桥接 + scrcpy-server + Vite（**默认全流程**） |
+| **`npm run dev:run`** | 不释端口，直接启动上述三个子进程 |
+| **`npm run dev:lite`** | 释端口 + 仅桥接 + Vite（**无** Scrcpy，适合未装 scrcpy 或只要 ADB） |
+| **`npm run dev:lite:run`** | 仅桥接 + Vite，不释端口 |
+| **`npm run dev:raw`** | 仅 Vite（需自行已起桥接） |
+| **`npm run dev:bridge`** | 仅 HTTP 桥接 |
+| **`npm run dev:local`** | Bash：`start-local.sh`，含端口清理后桥接 + Scrcpy + Vite（与 Node 一键类似，可按习惯选用） |
+| **`npm run build`** | 生产构建 |
+| **`npm run preview`** | 预览构建产物 |
+| **`npm run lint`** | `tsc --noEmit` |
+| **`npm run dev:suppress-adb`** | 旧流程：启动前反复 `adb kill-server`（WebUSB 独占等场景，macOS/Linux） |
 
-## 顶层 Activity 获取
+### 健康检查
 
-工具内「顶层 Activity」与下列命令等价（在 **设备 shell** 内管道，首行即栈顶相关输出）：
+- 桥接：**`GET /api/health`**（或旧版桥接无该接口时会 fallback `adb version`）  
+- 连接设备前前端会探测桥接是否可用；失败时请确认已 **`npm start`** 且终端出现 **`ADB server running`**。
+
+---
+
+## 连接设备
+
+1. 手机开启 **USB 调试**，USB 模式建议 **文件传输 / MTP**。  
+2. 终端执行 **`adb devices`**，须为 **`序列号    device`**。  
+3. 在页面点击 **连接设备**。  
+
+**行为说明**
+
+- 会解析 **`adb devices`**，**无 `device` 状态设备时会报错**（避免「假连接」）。  
+- **多机**时自动为当前选中设备带上 **`-s 序列号`**（命令与 **`/api/screen?serial=`** 截图一致）。  
+- 顶栏展示 **设备名称 / 型号 / ADB 序列号**；镜像区显示 **画面来源**，便于确认当前操作的是哪一台。
+
+---
+
+## 屏幕镜像
+
+| 模式 | 条件 | 说明 |
+|------|------|------|
+| **Scrcpy 视频流** | `ws://页面主机:13377` 连通且浏览器支持 **WebCodecs** | H.264 解码后绘制 Canvas，流畅度好。**`npm start` 默认启动 `scrcpy-server.js`**。 |
+| **ADB 连续截图** | 桥接 **3003** 可用（`GET /api/screen`） | 与 Scrcpy **并行**；Scrcpy 未就绪时兜底。全屏 PNG，约 **5～9 帧/秒**，**延迟明显更高**。 |
+
+- 顶栏会显示 **「Scrcpy · x FPS」** 或 **「ADB 截图…」**。  
+- 镜像工具栏 **刷新** 可重连 WebSocket / 解码器。  
+- 若长期只有 ADB 截图：查看 **`[scrcpy]`** 日志、本机是否安装 scrcpy、设备是否为 **`device`**。
+
+---
+
+## WebView / H5 调试（完整访问地址）
+
+面板 **「WebView H5 调试」** 会从设备侧 **多段 `dumpsys` 输出** 聚合解析（包括但不限于）：
+
+- `dumpsys activity top`  
+- `dumpsys activity activities`（截断前若干行，避免过大）  
+- `dumpsys window windows`（截断）  
+- 若有前台包名：再 grep 该包相关片段（包名经校验，仅字母数字与 `_` `.`）
+
+从中提取 **http(s) / file** 完整链接（尽量保留 **query、hash**），并识别常见字段如 **`mUrl` / `mOriginalUrl` / `HistoryUrl` / `loadedUrl`** 等，生成：
+
+- **主地址 `currentUrl`**：优先关键字行中的 URL，否则取长匹配。  
+- **`urlCandidates`**：去重后的候选列表，界面可展开逐条 **复制**。  
+- **`webViewUserAgent`**：若 dumpsys 中能解析到 WebView **User-Agent** 会单独展示。  
+
+> 地址来源仍为系统 dumpsys，**若 ROM 或壳包不把真实 URL 暴露在 activity 记录中**，可能仍不完整；可与 **`chrome://inspect`** 对照。  
+
+连接设备并打开含 WebView 的页面后，点击该面板 **刷新** 拉取最新数据。AI 侧栏上下文会附带主 URL、WebView UA（若有）及候选地址列表。
+
+---
+
+## 顶层 Activity
+
+与在设备上执行（示意）等价：
 
 ```bash
 adb shell "dumpsys activity | grep -E 'topActivity|mResumedActivity' | head -1"
 ```
 
-界面会展示解析后的包名、Activity 类名、任务 ID，以及 **dumpsys 原始首行**（便于对照真机输出）。
+界面展示解析后的 **包名、Activity、任务 ID** 及 **原始首行**，便于与真机输出对照。连接后点面板 **刷新** 更新。
 
-连接后点击面板右上角 **刷新** 可重新拉取。
+---
 
-## Scheme 跳转测试
+## Scheme / Deep Link 测试
 
-独立面板 **「Scheme 跳转测试」**（与栈顶 Activity 无关）：
+在 **「Scheme 跳转测试」** 区域：
 
-1. 输入 **scheme / App Link / https** 等（如 `myapp://detail/123`）。
-2. 点 **「跳转」**：先在前端 **解析并规范化** URI，再执行 `am start -a VIEW -d "…"`。
-3. **限定包名（可选）**：填写合法包名时追加 `-p`，由指定应用接收 Intent。
+1. 输入 **自定义 scheme / App Link / https** 等。  
+2. **跳转**：前端解析规范化后执行 `am start -a android.intent.action.VIEW -d "…"`。  
+3. **可选包名**：填写合法包名时追加 **`-p`**，限定由指定应用处理。
 
-结果区会显示解析摘要与设备端返回信息。
+结果区展示解析摘要与设备返回信息。
+
+---
 
 ## 常见问题
 
-- **页面能开但一直连不上设备**：确认 `adb-server.js` 已在跑、3003 未被防火墙拦截，`adb devices` 为 **`device`** 状态。
-- **`adb devices` 里是 offline**：电脑已识别 USB，但 ADB 会话异常；**工具与命令行一样无法调试**。请换线/换口、USB 模式改为文件传输、撤销 USB 调试授权后重插、`adb kill-server && adb start-server`，直到变为 **device**。
-- **3000 端口报错**：重新执行 **`npm start`**（会自动尝试释端口），或手动 `lsof -i :3000` 查进程。
-- **截图失败 / 镜像一直转圈**：确认 3003 已启动；仅跑 Vite 没有桥接时无法截图。可等待自动切换 ADB 截图，或先起 `dev:local` 再试 Scrcpy。
-- **有 Scrcpy 仍无画面**：看浏览器控制台是否有 WebSocket / 解码错误；可点镜像区 **刷新** 或暂时依赖 ADB 截图模式。
+| 现象 | 处理 |
+|------|------|
+| **连不上设备 / Failed to fetch** | 确认已 **`npm start`**，桥接监听 **3003**；若用手机通过电脑 IP 打开页面，桥接需在同网段可达（桥接默认 `0.0.0.0`）。 |
+| **`adb devices` 为 offline** | 换线/换口、USB 文件传输、撤销 USB 调试授权后重插、`adb kill-server && adb start-server`，直到变为 **device**。 |
+| **端口占用** | 优先重新 **`npm start`**（会自动释端口）；或 `lsof -i :3000` 等手动查杀。 |
+| **镜像卡、延迟高** | 多为 **ADB 截图兜底**；确认 **`[scrcpy]`** 无报错，顶栏应出现 **Scrcpy · FPS**。 |
+| **截图 / 镜像失败** | 确认 **3003** 与设备 **device**；多机时核对顶栏 **序列号** 是否为当前手机。 |
+| **H5 地址不准或没有** | 依赖 dumpsys 可见性；换 ROM/壳或 WebView 实现后字段可能不同，可看 **候选地址列表** 或 `chrome://inspect`。 |
 
 ---
 
 ## 许可证与说明
 
-本项目为本地调试工具，请仅在合法授权的设备上使用。
+本项目为本地调试工具，请仅在 **合法授权** 的设备上使用。

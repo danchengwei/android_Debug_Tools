@@ -1,13 +1,23 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { AIAction } from "../types";
+import { AIAction, type DebugChatMessage } from "../types";
+import {
+  getEffectiveGeminiConfig,
+  type EffectiveGeminiConfig,
+  type EffectiveAiConfig,
+} from "./aiModelConfig";
+import { chatDebugWithGemini, completeTextGoogleGemini } from "./aiTextCompletion";
 
+function requireGeminiConfig(): EffectiveGeminiConfig {
+  const c = getEffectiveGeminiConfig();
+  if (!c) {
+    throw new Error("未配置 Gemini：请在 AI 侧栏齿轮中填写 API Key，或设置环境变量 GEMINI_API_KEY");
+  }
+  return c;
+}
 
 export const getNextAutomationAction = async (base64Image: string, goal: string, history: string[]): Promise<AIAction> => {
-  if (!process.env.API_KEY) {
-    throw new Error("API Key not found");
-  }
-
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const cfg = requireGeminiConfig();
+  const ai = new GoogleGenAI({ apiKey: cfg.apiKey });
   
   let rawBase64 = base64Image;
   if (base64Image.includes(',')) {
@@ -27,8 +37,12 @@ export const getNextAutomationAction = async (base64Image: string, goal: string,
 
 必须返回 JSON 格式。`;
 
+  const visionModel =
+    cfg.modelCode.includes("flash") || cfg.modelCode.includes("image")
+      ? cfg.modelCode
+      : "gemini-2.0-flash";
   const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
+    model: visionModel,
     contents: {
       parts: [
         { text: prompt },
@@ -77,12 +91,9 @@ export const getNextAutomationAction = async (base64Image: string, goal: string,
 // We assume process.env.API_KEY is available as per instructions.
 
 export const analyzeScreenWithGemini = async (base64Image: string, promptText: string) => {
-  if (!process.env.API_KEY) {
-    throw new Error("API Key not found in environment variables");
-  }
-
+  const cfg = requireGeminiConfig();
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: cfg.apiKey });
     
     // Convert the image data to the format expected by the SDK
     // If base64Image is a data URL (starts with "data:image/..."), strip the header
@@ -129,8 +140,12 @@ export const analyzeScreenWithGemini = async (base64Image: string, promptText: s
         });
     }
 
+    const visionModel =
+      cfg.modelCode.includes("flash") || cfg.modelCode.includes("image")
+        ? cfg.modelCode
+        : "gemini-2.0-flash";
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
+      model: visionModel,
       contents: {
         parts: parts
       },
@@ -154,11 +169,10 @@ export const analyzeDecompiledWithGemini = async (
   classes: string[],
   userQuestion: string
 ): Promise<string> => {
-  if (!process.env.API_KEY) {
-    throw new Error("API Key not found in environment variables");
+  const cfg = getEffectiveGeminiConfig();
+  if (!cfg) {
+    throw new Error("未配置 Gemini：请打开 AI 调试对话完成配置，或设置 GEMINI_API_KEY");
   }
-
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const classListText = classes.length > 500
     ? classes.slice(0, 500).join("\n") + `\n... 等共 ${classes.length} 个类（已截断前 500 个）`
     : classes.join("\n");
@@ -168,42 +182,28 @@ export const analyzeDecompiledWithGemini = async (
 
   const prompt = `【反编译类列表】\n${classListText}\n\n【用户问题】\n${userQuestion}`;
 
-  const response = await ai.models.generateContent({
-    model: "gemini-2.0-flash",
-    contents: { parts: [{ text: prompt }] },
-    config: { systemInstruction },
-  });
-
-  return response.text ?? "未得到有效回复。";
+  return completeTextGoogleGemini(cfg, systemInstruction, prompt);
 };
 
 /**
  * 对 trace 原始内容或摘要做简要分析（卡顿、掉帧、建议等），使用中文回复。
  */
 export const analyzeTraceWithGemini = async (traceContentOrSummary: string): Promise<string> => {
-  if (!process.env.API_KEY) {
-    throw new Error("API Key not found in environment variables");
+  const cfg = getEffectiveGeminiConfig();
+  if (!cfg) {
+    throw new Error("未配置 Gemini：请打开 AI 调试对话完成配置，或设置 GEMINI_API_KEY");
   }
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const excerpt =
     traceContentOrSummary.length > 30000
       ? traceContentOrSummary.slice(0, 30000) + "\n\n... (已截断)"
       : traceContentOrSummary;
   const systemInstruction =
     "你是一位 Android 性能与 systrace/atrace 分析专家。用户会提供一段 trace 原始输出或摘要。请从渲染、主线程、掉帧、卡顿、IPC 等角度给出简要结论与优化建议，使用中文，条理清晰。";
-  const response = await ai.models.generateContent({
-    model: "gemini-2.0-flash",
-    contents: { parts: [{ text: `【Trace 内容】\n${excerpt}\n\n请给出简要分析与建议。` }] },
-    config: { systemInstruction },
-  });
-  return response.text ?? "未得到有效回复。";
+  const userText = `【Trace 内容】\n${excerpt}\n\n请给出简要分析与建议。`;
+  return completeTextGoogleGemini(cfg, systemInstruction, userText);
 };
 
-/** 调试对话中的一条消息 */
-export interface DebugChatMessage {
-  role: 'user' | 'model';
-  content: string;
-}
+export type { DebugChatMessage } from "../types";
 
 /**
  * 基于当前调试上下文与 AI 多轮对话。systemContext 由调用方从 device/栈/环境/布局/日志/trace/反编译 等拼成。
@@ -211,29 +211,16 @@ export interface DebugChatMessage {
 export const chatWithDebugContext = async (
   systemContext: string,
   userMessage: string,
-  history: DebugChatMessage[] = []
+  history: DebugChatMessage[] = [],
+  configOverride?: Pick<EffectiveGeminiConfig, "apiKey" | "modelCode"> | EffectiveAiConfig | null
 ): Promise<string> => {
-  if (!process.env.API_KEY) {
-    throw new Error("API Key not found in environment variables");
+  const cfg = configOverride ?? getEffectiveGeminiConfig();
+  if (!cfg) {
+    throw new Error("未配置 Gemini 模型");
   }
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
   const systemInstruction =
     "你是一位资深的 Android 开发与调试专家，熟悉设备信息、Activity 栈、环境配置、布局层级、logcat、systrace/atrace、反编译类列表等。用户会提供当前调试上下文的摘要，并可能追问。请根据上下文和对话历史，用中文简洁、准确地回答；若信息不足请说明。";
 
-  const parts: { text: string }[] = [];
-  for (const msg of history) {
-    parts.push({ text: `${msg.role === 'user' ? '用户' : '助手'}: ${msg.content}\n` });
-  }
-  parts.push({
-    text: `用户: ${userMessage}\n\n请根据以下上下文回答。\n\n【当前调试上下文】\n${systemContext}`,
-  });
-
-  const response = await ai.models.generateContent({
-    model: "gemini-2.0-flash",
-    contents: { parts },
-    config: { systemInstruction },
-  });
-
-  return response.text ?? "未得到有效回复。";
+  return chatDebugWithGemini(cfg, systemInstruction, systemContext, userMessage, history);
 };

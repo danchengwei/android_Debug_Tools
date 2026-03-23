@@ -37,7 +37,7 @@
 | **ADB** | 本机已安装，`adb devices` 中设备状态须为 **`device`**（`offline` / `unauthorized` 时无法调试） |
 | **scrcpy** | 建议安装（[Genymobile/scrcpy](https://github.com/Genymobile/scrcpy)）。**`npm start` 默认会起 `scrcpy-server.js`**；若不需要视频流可用 **`npm run dev:lite`** |
 | **浏览器** | 推荐 **Chrome / Edge** |
-| **Gemini AI** | 可选：项目根目录 `.env.local` 中配置 `GEMINI_API_KEY` |
+| **Gemini AI** | 全站 AI（对话、Trace/反编译分析、截图自动化、截屏分析）均使用 **Google Gemini**。在 **AI 调试对话** 齿轮中填写 **API Key** 与模型代号（默认 `gemini-2.0-flash`），或仅在项目根 `.env.local` 配置 **`GEMINI_API_KEY`**（构建时注入，无需浏览器再存）。 |
 
 **环境变量（可选）**
 

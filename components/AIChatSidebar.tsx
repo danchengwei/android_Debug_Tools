@@ -1,7 +1,18 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { chatWithDebugContext, type DebugChatMessage } from '../services/geminiService';
-import type { DeviceInfo, AppStackInfo, AppEnvInfo, H5Info, LayoutNode, LogEntry, DecompileInfo } from '../types';
-import { MessageSquare, Send, Loader2, X } from 'lucide-react';
+import { chatWithDebugContext } from '../services/geminiService';
+import { getEffectiveGeminiConfig, isAiModelConfigured } from '../services/aiModelConfig';
+import type {
+  DeviceInfo,
+  AppStackInfo,
+  AppEnvInfo,
+  H5Info,
+  LayoutNode,
+  LogEntry,
+  DecompileInfo,
+  DebugChatMessage,
+} from '../types';
+import { AIModelConfigModal } from './AIModelConfigModal';
+import { MessageSquare, Send, Loader2, X, Settings2 } from 'lucide-react';
 
 export interface AIChatSidebarContext {
   device: DeviceInfo | null;
@@ -108,22 +119,41 @@ export const AIChatSidebar: React.FC<AIChatSidebarProps> = ({ open, onClose, con
   const [messages, setMessages] = useState<DebugChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [configModalOpen, setConfigModalOpen] = useState(false);
+  /** 本会话内用户关掉过「未配置时自动弹出」的配置窗，避免反复打扰；发送时仍会再提示 */
+  const [dismissedAutoConfigPrompt, setDismissedAutoConfigPrompt] = useState(false);
+  const [configVersion, setConfigVersion] = useState(0);
   const listEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     listEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  useEffect(() => {
+    if (!open) {
+      setDismissedAutoConfigPrompt(false);
+      return;
+    }
+    if (!isAiModelConfigured() && !dismissedAutoConfigPrompt) {
+      setConfigModalOpen(true);
+    }
+  }, [open, dismissedAutoConfigPrompt]);
+
   const handleSend = async () => {
     const text = input.trim();
     if (!text || loading) return;
+    const cfg = getEffectiveGeminiConfig();
+    if (!cfg) {
+      setConfigModalOpen(true);
+      return;
+    }
     setInput('');
     const userMsg: DebugChatMessage = { role: 'user', content: text };
     setMessages((prev) => [...prev, userMsg]);
     setLoading(true);
     try {
       const systemContext = buildSystemContext(context);
-      const reply = await chatWithDebugContext(systemContext, text, messages);
+      const reply = await chatWithDebugContext(systemContext, text, messages, cfg);
       setMessages((prev) => [...prev, { role: 'model', content: reply }]);
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
@@ -137,6 +167,18 @@ export const AIChatSidebar: React.FC<AIChatSidebarProps> = ({ open, onClose, con
 
   return (
     <>
+      <AIModelConfigModal
+        open={configModalOpen}
+        onClose={() => {
+          setConfigModalOpen(false);
+          setDismissedAutoConfigPrompt(true);
+        }}
+        onSaved={() => {
+          setConfigVersion((v) => v + 1);
+          setConfigModalOpen(false);
+          setDismissedAutoConfigPrompt(false);
+        }}
+      />
       <div className="fixed inset-0 z-40 bg-black/30" aria-hidden onClick={onClose} />
       <aside
         className="fixed top-0 right-0 z-50 w-full max-w-md h-full bg-slate-900 border-l border-slate-700 shadow-xl flex flex-col"
@@ -147,17 +189,39 @@ export const AIChatSidebar: React.FC<AIChatSidebarProps> = ({ open, onClose, con
           <h2 className="text-sm font-bold text-cyan-300 flex items-center gap-2">
             <MessageSquare size={18} /> AI 调试对话
           </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
-            aria-label="关闭"
-          >
-            <X size={18} />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                setDismissedAutoConfigPrompt(false);
+                setConfigModalOpen(true);
+              }}
+              className="p-1.5 rounded text-slate-400 hover:text-cyan-300 hover:bg-slate-700 transition-colors"
+              title="Gemini API Key 与模型"
+              aria-label="Gemini 配置"
+            >
+              <Settings2 size={18} />
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+              aria-label="关闭"
+            >
+              <X size={18} />
+            </button>
+          </div>
         </div>
-        <p className="text-[10px] text-slate-500 px-4 py-1.5 border-b border-slate-800 shrink-0">
+        <p
+          key={configVersion}
+          className="text-[10px] text-slate-500 px-4 py-1.5 border-b border-slate-800 shrink-0"
+        >
           可访问：设备、Activity 栈、环境、布局、logcat、Trace、反编译等已获取的信息
+          <span className="block mt-0.5 text-slate-600">
+            {isAiModelConfigured()
+              ? '已加载 Gemini（本机 localStorage 或构建时 GEMINI_API_KEY）'
+              : '未配置时将弹出 Gemini 设置（可关闭）；发送前需填写 Key 或配置 .env'}
+          </span>
         </p>
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {messages.length === 0 && (

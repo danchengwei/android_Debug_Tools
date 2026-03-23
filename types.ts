@@ -87,6 +87,12 @@ export interface AutomationStep {
   timestamp: number;
 }
 
+/** AI 调试对话中的一条消息 */
+export interface DebugChatMessage {
+  role: 'user' | 'model';
+  content: string;
+}
+
 /** 反编译结果：从 APK 中解析出的类/方法等信息 */
 export interface DecompileInfo {
   /** 包名（从 AndroidManifest 或 classes 推断） */
